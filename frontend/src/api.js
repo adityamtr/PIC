@@ -32,6 +32,7 @@ export const api = {
   fund: (fundId) => get(`/fund${qs(fundId)}`),
   holdings: (fundId) => get(`/holdings${qs(fundId)}`),
   sectorExposure: (fundId) => get(`/sector-exposure${qs(fundId)}`),
+  universe: () => get('/universe'),
   cash: (fundId) => get(`/cash${qs(fundId)}`),
   pendingTrades: (fundId) => get(`/pending-trades${qs(fundId)}`),
   executedTrades: (fundId) => get(`/executed-trades${qs(fundId)}`),

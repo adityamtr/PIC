@@ -29,9 +29,30 @@ uvicorn app.main:app --reload --port 8000
 | File | Responsibility |
 |------|----------------|
 | `app/data.py` | Synthetic dataset (fund, holdings, cash, pending trades, lock-ins, compliance limits, corporate actions, expense, universe, events). Replace with live feeds later. |
-| `app/planner.py` | Cash-flow planning, funding, order generation, compliance checks, risk flags, recommendation. |
+| `app/forecast.py` | **Return-forecasting placeholder** — dummy expected 1-month returns per stock, in the shape the production TFT model will produce. Swap the body of `predict_returns` for real inference later. |
+| `app/optimizer.py` | **Convex-optimization engine (CVXPY)**, adapted from the `mozart` prototype: `optimize_buy` / `optimize_sell` / `optimize_rebalance`. Optional dependency — if `cvxpy` is missing the planner falls back to rules. |
+| `app/planner.py` | Cash-flow planning, funding, order generation (rule-based **or** forecast-driven convex optimization), compliance checks, risk flags, recommendation. |
 | `app/schemas.py` | Pydantic request/response models. |
 | `app/main.py` | FastAPI app & routes. |
+
+## Allocation methods
+
+`POST /api/trade-plan` accepts a `method` field:
+
+- `"optimize"` (default) — `forecast.py` predicts each stock's expected 1-month return and
+  `optimizer.py` solves a convex program to choose the allocation (deploy cash into the
+  highest-forecast names, raise cash from the lowest-forecast names, and retilt the book
+  within issuer + turnover limits).
+- `"manual"` — use `manual_selections` to specify each ticker, BUY/SELL side, and amount, or
+  `manual_sector_selections` to specify each sector and amount. Sell orders are capped by each
+  holding's sellable shares.
+- `"rules"` — the original heuristic drift/target logic decides which
+  holdings to change.
+
+Either way the **same compliance and risk rules run on the result**, and the
+plan still comes back as `Pending PIC Review`. Every plan includes a `forecast`
+block (the predicted returns) and, for `optimize`, an `optimization` meta block
+(solver, status, objective); every order carries its `expected_return`.
 
 ## Key endpoints
 
@@ -54,7 +75,13 @@ uvicorn app.main:app --reload --port 8000
 ### Example: generate a plan
 
 ```bash
+# rule-based (default)
 curl -X POST http://localhost:8000/api/trade-plan \
   -H "Content-Type: application/json" \
   -d '{"action":"increase","target":"Technology","amount_cr":50,"horizon_days":5}'
+
+# forecast-driven convex optimization
+curl -X POST http://localhost:8000/api/trade-plan \
+  -H "Content-Type: application/json" \
+  -d '{"action":"increase","target":"Technology","amount_cr":50,"method":"optimize"}'
 ```

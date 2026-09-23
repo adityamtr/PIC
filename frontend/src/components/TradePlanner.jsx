@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import {
   Alert, Box, Button, Checkbox, Chip, CircularProgress, Divider, Grow,
-  ListItemText, MenuItem, Stack, Step, StepLabel, Stepper, Table, TableBody,
-  TableCell, TableHead, TableRow, TextField, ToggleButton, ToggleButtonGroup,
+  FormControl, InputLabel, ListItemText, MenuItem, Select, Stack, Step, StepLabel,
+  Stepper, Table, TableBody, TableCell, TableHead, TableRow, TextField,
+  ToggleButton, ToggleButtonGroup,
   Typography,
 } from '@mui/material'
 import CheckCircleIcon from '@mui/icons-material/CheckCircle'
@@ -41,6 +42,8 @@ const PRESETS = [
 const sevOf = (s) => (s === 'FAIL' || s === 'BREACH' || s === 'HIGH' ? 'error'
   : s === 'WARN' || s === 'MEDIUM' ? 'warning' : 'success')
 
+const fmtRet = (r) => (r == null ? '—' : `${(r * 100).toFixed(2)}%`)
+
 function OrdersTable({ orders }) {
   if (!orders.length) return <Typography color="text.secondary">No orders generated.</Typography>
   return (
@@ -51,6 +54,7 @@ function OrdersTable({ orders }) {
             <TableCell>Security</TableCell><TableCell>Side</TableCell>
             <TableCell align="right">Shares</TableCell><TableCell align="right">Price</TableCell>
             <TableCell align="right">Est. Value</TableCell>
+            <TableCell align="right">Pred. 1-M Return</TableCell>
           </TableRow>
         </TableHead>
         <TableBody>
@@ -67,6 +71,9 @@ function OrdersTable({ orders }) {
               <TableCell align="right">{fmtNum(o.shares)}</TableCell>
               <TableCell align="right">{fmtRupee(o.price, 0)}</TableCell>
               <TableCell align="right">{fmtCrValue(toCr(o.est_value))}</TableCell>
+              <TableCell align="right" sx={{ color: o.expected_return >= 0 ? 'success.main' : 'error.main', fontWeight: 600 }}>
+                {fmtRet(o.expected_return)}
+              </TableCell>
             </TableRow>
           ))}
         </TableBody>
@@ -75,18 +82,65 @@ function OrdersTable({ orders }) {
   )
 }
 
+// Forecast (predicted returns) — the TFT placeholder output that drives the
+// convex optimizer. Order tickers are highlighted so the reviewer can see which
+// predicted returns the plan acted on.
+function ForecastPanel({ forecast, orderTickers }) {
+  if (!forecast) return null
+  return (
+    <Panel title="Forecast — Predicted 1-M Returns"
+      subtitle={`${forecast.model} · horizon ${forecast.horizon}${forecast.is_placeholder ? ' · placeholder (dummy returns until the TFT model is wired in)' : ''}`}>
+      <ScrollX maxHeight={280}>
+        <Table size="small" stickyHeader>
+          <TableHead>
+            <TableRow>
+              <TableCell>Security</TableCell><TableCell>Sector</TableCell>
+              <TableCell align="right">Pred. Return</TableCell>
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {forecast.rows.map((r) => {
+              const inPlan = orderTickers.has(r.ticker)
+              return (
+                <TableRow key={r.ticker} hover selected={inPlan}>
+                  <TableCell>
+                    <Typography variant="body2" fontWeight={inPlan ? 700 : 500}>
+                      {r.ticker}{inPlan ? ' •' : ''}
+                    </Typography>
+                  </TableCell>
+                  <TableCell><Typography variant="caption" color="text.secondary">{r.sector}</Typography></TableCell>
+                  <TableCell align="right" sx={{ color: r.expected_return_1m >= 0 ? 'success.main' : 'error.main', fontWeight: 600 }}>
+                    {fmtRet(r.expected_return_1m)}
+                  </TableCell>
+                </TableRow>
+              )
+            })}
+          </TableBody>
+        </Table>
+      </ScrollX>
+    </Panel>
+  )
+}
+
 export default function TradePlanner({ fundId }) {
   const [action, setAction] = useState('contribution')
   const [amount, setAmount] = useState(250)
   const [targets, setTargets] = useState(['Information Technology'])
+  const [manualSelections, setManualSelections] = useState([])
+  const [manualSectorSelections, setManualSectorSelections] = useState([])
   const [horizon, setHorizon] = useState(5)
+  const [method, setMethod] = useState('optimize')
   const [plan, setPlan] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const [decision, setDecision] = useState(null)
   const [fundSectors, setFundSectors] = useState([])
+  const [universe, setUniverse] = useState([])
+  const [holdings, setHoldings] = useState([])
+  const securityOptions = [...universe, ...holdings.filter((h) => !universe.some((u) => u.ticker === h.ticker))]
 
   const cfg = ACTIONS.find((a) => a.key === action)
+  const manualUsesSectors = method === 'manual' && cfg.needsTarget
   // Increase can target any buyable sector; Reduce only sectors the fund holds.
   const sectorOptions = action === 'increase'
     ? BUYABLE_SECTORS
@@ -95,18 +149,25 @@ export default function TradePlanner({ fundId }) {
   // On fund change: clear any plan and load the fund's sectors for the dropdown.
   useEffect(() => {
     setPlan(null); setDecision(null)
+    setManualSelections([])
+    setManualSectorSelections([])
     api.sectorExposure(fundId)
       .then((d) => setFundSectors(d.sectors.map((s) => s.sector)))
       .catch(() => setFundSectors([]))
+    api.universe().then((d) => setUniverse(d.universe)).catch(() => setUniverse([]))
+    api.holdings(fundId).then((d) => setHoldings(d.holdings)).catch(() => setHoldings([]))
   }, [fundId])
 
   // Keep the selected sectors valid for the current action / fund.
   useEffect(() => {
     if (!cfg.needsTarget) return
-    const valid = targets.filter((t) => sectorOptions.includes(t))
-    if (valid.length === 0) setTargets([sectorOptions[0]])
+    const options = method === 'manual' && !manualUsesSectors
+      ? (action === 'increase' ? universe.map((u) => u.ticker) : holdings.map((h) => h.ticker))
+      : sectorOptions
+    const valid = targets.filter((t) => options.includes(t))
+    if (valid.length === 0 && options.length) setTargets([options[0]])
     else if (valid.length !== targets.length) setTargets(valid)
-  }, [action, fundSectors]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [action, fundSectors, method, universe, holdings, manualUsesSectors]) // eslint-disable-line react-hooks/exhaustive-deps
 
   function applyPreset(p) {
     setAction(p.action)
@@ -122,7 +183,10 @@ export default function TradePlanner({ fundId }) {
         action,
         amount_cr: cfg.needsAmount ? Number(amount) : undefined,
         targets: cfg.needsTarget ? targets : undefined,
+        manual_selections: method === 'manual' && !manualUsesSectors ? manualSelections : undefined,
+        manual_sector_selections: method === 'manual' && manualUsesSectors ? manualSectorSelections : undefined,
         horizon_days: Number(horizon),
+        method,
         fund_id: fundId,
       }
       setPlan(await api.createTradePlan(payload))
@@ -138,6 +202,8 @@ export default function TradePlanner({ fundId }) {
 
   const s = plan?.summary
   const activeStep = plan ? 4 : 0
+  const orderTickers = new Set((plan?.orders || []).map((o) => o.ticker))
+  const opt = plan?.optimization
 
   return (
     <Stack spacing={2.5}>
@@ -153,35 +219,117 @@ export default function TradePlanner({ fundId }) {
           {ACTIONS.map((a) => <ToggleButton key={a.key} value={a.key}>{a.label}</ToggleButton>)}
         </ToggleButtonGroup>
 
-        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ sm: 'flex-end' }}>
-          {cfg.needsTarget && (
-            <TextField label="Sectors" size="small" select
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} alignItems={{ sm: 'center' }} sx={{ mb: 2 }}>
+          <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>Allocation method</Typography>
+          <ToggleButtonGroup exclusive value={method} color="secondary" size="small"
+            onChange={(_, v) => v && (setMethod(v), setPlan(null), setDecision(null))}>
+            <ToggleButton value="manual">Manual</ToggleButton>
+            <ToggleButton value="rules">Rules-Based</ToggleButton>
+            <ToggleButton value="optimize">Convex Optimization</ToggleButton>
+          </ToggleButtonGroup>
+          <Typography variant="caption" color="text.secondary">
+            {method === 'manual'
+              ? 'Select securities or sectors and enter the amount for each one.'
+              : method === 'optimize'
+              ? 'Forecast-driven CVXPY optimizer picks the allocation; the same compliance & risk rules still apply.'
+              : 'Heuristic drift/target rules pick the allocation.'}
+          </Typography>
+        </Stack>
+
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}
+          alignItems={{ sm: 'flex-start' }} flexWrap="wrap">
+          {method === 'manual' && !manualUsesSectors ? (
+            <Stack spacing={1} sx={{ width: { xs: '100%', sm: 420 }, flexShrink: 0 }}>
+              <FormControl size="small" sx={{ width: '100%' }}>
+                <InputLabel id="manual-securities-label">Securities</InputLabel>
+                <Select labelId="manual-securities-label" label="Securities" multiple
+                value={manualSelections.map((s) => s.ticker)}
+                onChange={(e) => {
+                  const tickers = e.target.value
+                  setManualSelections(tickers.map((ticker) => ({
+                    ticker,
+                    side: manualSelections.find((s) => s.ticker === ticker)?.side || 'BUY',
+                    amount_cr: manualSelections.find((s) => s.ticker === ticker)?.amount_cr || 0,
+                  })))
+                }}
+                sx={{ width: '100%', '& .MuiSelect-select': { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }}
+                renderValue={(selected) => selected.join(', ')}
+                MenuProps={{ disableAutoFocusItem: true }}>
+                {securityOptions.map((security) => (
+                  <MenuItem key={security.ticker} value={security.ticker}>
+                    <Checkbox size="small" checked={manualSelections.some((s) => s.ticker === security.ticker)} />
+                    <ListItemText primary={security.ticker} secondary={security.name} />
+                  </MenuItem>
+                ))}
+                </Select>
+                <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
+                  Select securities, then choose BUY or SELL for each.
+                </Typography>
+              </FormControl>
+              {manualSelections.map((selection) => (
+                <Stack key={selection.ticker} direction="row" alignItems="center" justifyContent="space-between">
+                  <Typography variant="body2" fontWeight={600}>{selection.ticker}</Typography>
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <TextField size="small" type="number" label="₹ Cr" value={selection.amount_cr}
+                      onChange={(e) => setManualSelections((current) => current.map((item) =>
+                        item.ticker === selection.ticker ? { ...item, amount_cr: e.target.value } : item))}
+                      sx={{ width: 105 }} />
+                    <ToggleButtonGroup exclusive size="small" value={selection.side}
+                      onChange={(_, side) => side && setManualSelections((current) => current.map((item) =>
+                        item.ticker === selection.ticker ? { ...item, side } : item))}>
+                      <ToggleButton value="BUY">BUY</ToggleButton>
+                      <ToggleButton value="SELL">SELL</ToggleButton>
+                    </ToggleButtonGroup>
+                  </Stack>
+                </Stack>
+              ))}
+            </Stack>
+          ) : cfg.needsTarget && (
+            <FormControl size="small" sx={{ width: { xs: '100%', sm: 300 }, flexShrink: 0 }}>
+              <InputLabel id="sector-targets-label">Sectors</InputLabel>
+              <Select labelId="sector-targets-label" label="Sectors" multiple
               value={targets.filter((t) => sectorOptions.includes(t))}
-              onChange={(e) => setTargets(
-                typeof e.target.value === 'string' ? e.target.value.split(',') : e.target.value)}
-              helperText={targets.length > 1 ? `Amount split evenly across ${targets.length} sectors` : ' '}
-              sx={{ minWidth: 260 }}
-              SelectProps={{
-                multiple: true,
-                renderValue: (sel) => sel.join(', '),
-              }}>
-              {sectorOptions.map((sc) => (
-                <MenuItem key={sc} value={sc}>
-                  <Checkbox size="small" checked={targets.indexOf(sc) > -1} />
-                  <ListItemText primary={sc} />
+              onChange={(e) => {
+                const selected = e.target.value
+                setTargets(selected)
+                setManualSectorSelections(selected.map((sector) => ({
+                  sector,
+                  amount_cr: manualSectorSelections.find((item) => item.sector === sector)?.amount_cr || 0,
+                })))
+              }}
+              sx={{ width: '100%',
+                '& .MuiSelect-select': { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }}
+              renderValue={(selected) => selected.join(', ')}
+              MenuProps={{ disableAutoFocusItem: true }}>
+              {sectorOptions.map((sector) => (
+                <MenuItem key={sector} value={sector}>
+                  <Checkbox size="small" checked={targets.indexOf(sector) > -1} />
+                  <ListItemText primary={sector} />
                 </MenuItem>
               ))}
-            </TextField>
+              </Select>
+              <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
+                Enter a separate amount for each selected sector.
+              </Typography>
+              {manualSectorSelections.map((selection) => (
+                <TextField key={selection.sector} size="small" type="number" label={`${selection.sector} (₹ Cr)`}
+                  value={selection.amount_cr}
+                  onChange={(e) => setManualSectorSelections((current) => current.map((item) =>
+                    item.sector === selection.sector ? { ...item, amount_cr: e.target.value } : item))}
+                  sx={{ width: '100%' }} />
+              ))}
+            </FormControl>
           )}
-          {cfg.needsAmount && (
+          {cfg.needsAmount && method !== 'manual' && (
             <TextField label="Amount (₹ Cr)" size="small" type="number" value={amount}
-              onChange={(e) => setAmount(e.target.value)} sx={{ minWidth: 150 }} />
+              onChange={(e) => setAmount(e.target.value)} sx={{ width: { xs: '100%', sm: 150 }, flexShrink: 0 }} />
           )}
           <TextField label="Horizon" size="small" select value={horizon}
-            onChange={(e) => setHorizon(e.target.value)} sx={{ minWidth: 130 }}>
+            onChange={(e) => setHorizon(e.target.value)} sx={{ width: { xs: '100%', sm: 130 }, flexShrink: 0 }}>
             {[3, 5, 10, 15].map((d) => <MenuItem key={d} value={d}>{d} business days</MenuItem>)}
           </TextField>
           <Button variant="contained" size="large" onClick={generate} disabled={busy}
+            sx={{ width: 170, minWidth: 170, height: 40, flexShrink: 0 }}
             startIcon={busy ? <CircularProgress size={16} color="inherit" /> : null}>
             {busy ? 'Generating…' : 'Generate Plan'}
           </Button>
@@ -214,7 +362,25 @@ export default function TradePlanner({ fundId }) {
                 sub={decision ? decision.status : plan.status} />
             </KpiGrid>
 
+            <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1 }}>
+              <Chip size="small" color={plan.allocation_method === 'optimize' ? 'secondary' : 'default'}
+                variant={plan.allocation_method === 'optimize' ? 'filled' : 'outlined'}
+                label={plan.allocation_method === 'optimize' ? 'Convex Optimization'
+                  : plan.allocation_method === 'manual' ? 'Manual' : 'Rules-Based'} />
+              {plan.intent?.method === 'optimize' && plan.allocation_method === 'rules' && (
+                <Chip size="small" color="warning" variant="outlined" label="optimizer fell back to rules" />
+              )}
+            </Stack>
+
             <Alert severity={sevOf(s.compliance_status)} variant="outlined">{plan.recommendation}</Alert>
+            {opt && (
+              <Alert severity="info" variant="outlined">
+                <strong>Optimizer:</strong> {opt.objective} · solver {opt.solver} ({opt.status})
+                {opt.deployed_return_pct != null && <> · deployed-capital return {opt.deployed_return_pct}%</>}
+                {opt.given_up_return_cr != null && <> · return given up {fmtCrValue(opt.given_up_return_cr)} to raise {fmtCrValue(opt.amount_raised_cr)}</>}
+                {opt.expected_return_post_pct != null && <> · book return {opt.expected_return_pre_pct}% → {opt.expected_return_post_pct}% (turnover ≤ {opt.turnover_budget_pct}%)</>}
+              </Alert>
+            )}
             {plan.warnings?.map((w, i) => <Alert key={i} severity="warning">{w}</Alert>)}
 
             {/* Bento: the generated orders are the hero (wide, highlighted);
@@ -234,6 +400,8 @@ export default function TradePlanner({ fundId }) {
               </Panel>
 
               <Stack spacing={2.5}>
+                <ForecastPanel forecast={plan.forecast} orderTickers={orderTickers} />
+
                 <Panel title={`Cash-Flow Planning → ${fmtCrValue(toCr(plan.cash_flow_planning.investable_amount))}`}>
                   <Table size="small">
                     <TableBody>

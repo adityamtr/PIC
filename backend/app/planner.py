@@ -18,9 +18,14 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from . import data
+from . import data, forecast, optimizer
 
 CRORE = data.CRORE
+
+# Per-issuer cap (fraction of AUM) the convex optimizer respects up-front, so its
+# proposals arrive already inside the SEBI single-issuer limit that the
+# compliance rules re-check afterwards.
+_ISSUER_CAP_FRAC = data.COMPLIANCE_LIMITS["single_issuer_limit"] / 100
 
 _SECTOR_ALIASES = {
     "technology": "Information Technology", "tech": "Information Technology",
@@ -332,28 +337,9 @@ def _risk_flags(ds, orders, extra_notes, horizon_days):
 
 
 # --------------------------------------------------------------------------- #
-# Public entry point
+# Order generation — rule-based (the original heuristics)
 # --------------------------------------------------------------------------- #
-def generate_plan(fund_id, intent):
-    ds = data.get_ds(fund_id)
-    action = (intent.get("action") or "contribution").lower()
-    target = intent.get("target") or ""
-    amount = float(intent.get("amount_cr") or 0) * CRORE
-    horizon = int(intent.get("horizon_days") or 5)
-
-    # Resolve one or more target sectors. `targets` (list) takes precedence; a
-    # single `target` (optionally comma-separated) is still accepted.
-    raw_targets = intent.get("targets")
-    if not raw_targets:
-        raw_targets = [t for t in target.split(",")] if target else []
-    sectors = []
-    for t in raw_targets:
-        s = resolve_sector(t)
-        if s and s not in sectors:
-            sectors.append(s)
-    cfp = cash_flow_planning(ds, horizon)
-    investable = cfp["investable_amount"]
-
+def _orders_by_rules(ds, action, sectors, amount, investable, target):
     orders, funding_sources, risk_notes, warnings = [], [], [], []
 
     if action == "contribution":
@@ -420,6 +406,251 @@ def generate_plan(fund_id, intent):
     else:
         warnings.append(f"Unknown action '{action}'.")
 
+    return orders, funding_sources, risk_notes, warnings
+
+
+def _orders_by_manual(ds, selections, amount):
+    """Generate equal-value orders for securities explicitly selected by the user."""
+    orders, funding_sources, risk_notes, warnings = [], [], [], []
+    selected = []
+    for selection in selections:
+        ticker = selection.get("ticker")
+        side = selection.get("side")
+        if (ticker, side) not in selected and (data.universe_entry(ticker) or data.holding(ds, ticker)):
+            selected.append((ticker, side))
+
+    if not selected:
+        return orders, funding_sources, risk_notes, ["Select at least one security for manual allocation."]
+
+    for ticker, side in selected:
+        selection_amount = next(
+            item.get("amount_cr", 0.0) * CRORE for item in selections
+            if item.get("ticker") == ticker and item.get("side") == side
+        )
+        if side == "BUY":
+            order = _order(ds, ticker, "BUY", rupees=selection_amount)
+            if order["shares"] > 0:
+                orders.append(order)
+            continue
+
+        if side == "SELL":
+            holding = data.holding(ds, ticker)
+            if not holding:
+                warnings.append(f"{ticker} is not held by this fund and was skipped for selling.")
+                continue
+            shares = int(min(selection_amount, holding["sellable_shares"] * holding["price"]) // holding["price"])
+            if shares > 0:
+                orders.append(_order(ds, ticker, "SELL", shares=shares))
+            if holding["locked_shares"] > 0 and selection_amount > holding["sellable_shares"] * holding["price"]:
+                risk_notes.append({"type": "lock_in", "severity": "MEDIUM", "ticker": ticker,
+                                   "message": f"{ticker} sell capped by locked shares."})
+    buy_total = sum(o["est_value"] for o in orders if o["side"] == "BUY")
+    sell_total = sum(o["est_value"] for o in orders if o["side"] == "SELL")
+    if buy_total:
+        funding_sources.append({"ticker": "CASH", "name": "Available cash", "sector": "Cash",
+                                "side": "USE", "shares": 0, "price": 0, "est_value": buy_total,
+                                "reason": "Manual BUY selections."})
+    if sell_total:
+        funding_sources.append({"ticker": "MANUAL-SELL", "name": "Selected securities", "sector": "Cash",
+                                "side": "OUT", "shares": 0, "price": 0, "est_value": sell_total,
+                                "reason": "Manual SELL selections."})
+
+    return orders, funding_sources, risk_notes, warnings
+
+
+# --------------------------------------------------------------------------- #
+# Order generation — convex optimization (forecast-driven, CVXPY)
+# --------------------------------------------------------------------------- #
+def _buy_candidates(ds, sectors, returns):
+    """Buyable names: the fund's holdings plus the sector universe, restricted to
+    `sectors` when given (for a sector-targeted increase)."""
+    seen, out = set(), []
+    for h in ds["holdings"]:
+        if sectors and h["sector"] not in sectors:
+            continue
+        seen.add(h["ticker"])
+        out.append({"ticker": h["ticker"], "price": h["price"],
+                    "current_value": h["market_value"], "expected_return": returns.get(h["ticker"], 0.0)})
+    for u in data.UNIVERSE:
+        if u["ticker"] in seen:
+            continue
+        if sectors and u["sector"] not in sectors:
+            continue
+        held = data.holding(ds, u["ticker"])
+        out.append({"ticker": u["ticker"], "price": u["price"],
+                    "current_value": held["market_value"] if held else 0.0,
+                    "expected_return": returns.get(u["ticker"], 0.0)})
+    return out
+
+
+def _sell_candidates(ds, sectors, returns):
+    return [{"ticker": h["ticker"], "price": h["price"], "sellable_shares": h["sellable_shares"],
+             "expected_return": returns.get(h["ticker"], 0.0)}
+            for h in ds["holdings"]
+            if (not sectors or h["sector"] in sectors) and h["sellable_shares"] > 0]
+
+
+def _orders_by_optimizer(ds, action, sectors, amount, investable, returns):
+    """Forecast-driven order generation. Returns the usual tuple plus an
+    optimization-meta dict. Raises on solver problems so the caller can fall
+    back to the rule-based path."""
+    orders, funding_sources, risk_notes, warnings = [], [], [], []
+    opt_meta = None
+    aum = ds["aum"]
+
+    if action in ("contribution", "increase", "buy", "add"):
+        if action != "contribution" and not sectors:
+            warnings.append(f"Could not map target to a known sector; no buy orders generated.")
+            return orders, funding_sources, risk_notes, warnings, opt_meta
+        candidates = _buy_candidates(ds, sectors if action != "contribution" else None, returns)
+        allocations, opt_meta = optimizer.optimize_buy(candidates, amount, aum, _ISSUER_CAP_FRAC)
+        for a in allocations:
+            orders.append({**_order(ds, a["ticker"], "BUY", shares=a["shares"]),
+                           "reason": "Convex-optimized to maximize forecast return"})
+        buy_total = sum(o["est_value"] for o in orders)
+        gap = buy_total - investable
+        if gap > 0:
+            sells, notes = _funding_sells(ds, gap, exclude_sectors=sectors or None)
+            funding_sources, orders = sells, orders + sells
+            risk_notes.extend(notes)
+            warnings.append(f"Purchase exceeds investable cash by ~Rs {gap / CRORE:,.1f} Cr; funded by trimming holdings.")
+        elif action == "contribution":
+            funding_sources = [{"ticker": "INFLOW", "name": "Contribution / subscription inflow",
+                                "sector": "Cash", "side": "IN", "shares": 0, "price": 0,
+                                "est_value": amount, "reason": "New cash deployed by convex optimizer to maximize forecast return."}]
+        else:
+            funding_sources = [{"ticker": "CASH", "name": "Available cash", "sector": "Cash",
+                                "side": "USE", "shares": 0, "price": 0, "est_value": buy_total,
+                                "reason": "Fully funded from investable cash."}]
+
+    elif action in ("redemption", "decrease", "sell", "trim", "raise_cash"):
+        sec = sectors if action in ("decrease", "sell", "trim") else None
+        candidates = _sell_candidates(ds, sec, returns)
+        sells, opt_meta = optimizer.optimize_sell(candidates, amount)
+        for sdict in sells:
+            orders.append({**_order(ds, sdict["ticker"], "SELL", shares=sdict["shares"]),
+                           "reason": "Convex-optimized to minimize forecast return given up"})
+        raised = sum(o["est_value"] for o in orders if o["side"] == "SELL")
+        if action == "redemption":
+            funding_sources = [{"ticker": "OUTFLOW", "name": "Redemption / payout", "sector": "Cash",
+                                "side": "OUT", "shares": 0, "price": 0, "est_value": raised,
+                                "reason": "Cash raised by selling the lowest-forecast-return names."}]
+
+    elif action == "rebalance":
+        holdings = [{**h, "expected_return": returns.get(h["ticker"], 0.0)} for h in ds["holdings"]]
+        targets, opt_meta = optimizer.optimize_rebalance(holdings, aum, _ISSUER_CAP_FRAC)
+        min_ticket = 0.25 * CRORE
+        for t in targets:
+            h = data.holding(ds, t["ticker"])
+            delta = t["delta_rupees"]
+            if abs(delta) < min_ticket or not h:
+                continue
+            if delta > 0:
+                shares = int(delta // h["price"])
+                if shares > 0:
+                    orders.append({**_order(ds, h["ticker"], "BUY", shares=shares),
+                                   "reason": "Convex rebalance toward higher forecast return"})
+            else:
+                sellable_value = h["sellable_shares"] * h["price"]
+                shares = int(min(-delta, sellable_value) // h["price"])
+                if shares > 0:
+                    orders.append({**_order(ds, h["ticker"], "SELL", shares=shares),
+                                   "reason": "Convex rebalance toward higher forecast return"})
+    else:
+        warnings.append(f"Unknown action '{action}'.")
+
+    return orders, funding_sources, risk_notes, warnings, opt_meta
+
+
+# --------------------------------------------------------------------------- #
+# Public entry point
+# --------------------------------------------------------------------------- #
+def generate_plan(fund_id, intent):
+    ds = data.get_ds(fund_id)
+    action = (intent.get("action") or "contribution").lower()
+    target = intent.get("target") or ""
+    amount = float(intent.get("amount_cr") or 0) * CRORE
+    horizon = int(intent.get("horizon_days") or 5)
+
+    # Resolve one or more target sectors. `targets` (list) takes precedence; a
+    # single `target` (optionally comma-separated) is still accepted.
+    raw_targets = intent.get("targets")
+    if not raw_targets:
+        raw_targets = [t for t in target.split(",")] if target else []
+    sectors = []
+    for t in raw_targets:
+        s = resolve_sector(t)
+        if s and s not in sectors:
+            sectors.append(s)
+    cfp = cash_flow_planning(ds, horizon)
+    investable = cfp["investable_amount"]
+
+    # Forecast expected 1-month returns (TFT placeholder). Used by the convex
+    # optimizer and shown in the plan regardless of method.
+    returns = forecast.predict_returns(
+        [h["ticker"] for h in ds["holdings"]] + [u["ticker"] for u in data.UNIVERSE]
+    )
+
+    # Allocation method: "manual", "rules" (heuristics) or "optimize" (forecast-driven
+    # convex optimization). Optimize falls back to rules on any problem so a plan
+    # is always produced; the compliance & risk *rules* run on the result either
+    # way.
+    requested_method = (intent.get("method") or "optimize").lower()
+    method_used = requested_method
+    opt_meta = None
+
+    if requested_method == "manual":
+        manual_selections = intent.get("manual_selections") or []
+        manual_sector_selections = intent.get("manual_sector_selections") or []
+        if manual_sector_selections:
+            manual_side = "BUY" if action == "increase" else "SELL"
+            for sector_selection in manual_sector_selections:
+                sector_names = [
+                    item for item in (data.UNIVERSE if action == "increase" else ds["holdings"])
+                    if item["sector"] == sector_selection["sector"]
+                ]
+                per_security_cr = sector_selection["amount_cr"] / len(sector_names) if sector_names else 0
+                manual_selections.extend([
+                    {"ticker": item["ticker"], "side": manual_side, "amount_cr": per_security_cr}
+                    for item in sector_names
+                ])
+        if not manual_selections and action in ("increase", "decrease"):
+            manual_side = "BUY" if action == "increase" else "SELL"
+            eligible = [
+                candidate for candidate in (data.UNIVERSE if action == "increase" else ds["holdings"])
+                if not sectors or candidate["sector"] in sectors
+            ]
+            per_security_cr = amount / CRORE / len(eligible) if eligible else 0
+            manual_selections = [
+                {"ticker": item["ticker"], "side": manual_side, "amount_cr": per_security_cr}
+                for item in eligible
+            ]
+        orders, funding_sources, risk_notes, warnings = _orders_by_manual(
+            ds, manual_selections, amount)
+    elif requested_method == "optimize":
+        if not optimizer.available():
+            method_used = "rules"
+            orders, funding_sources, risk_notes, warnings = _orders_by_rules(
+                ds, action, sectors, amount, investable, target)
+            warnings.append(f"Convex optimizer unavailable ({optimizer.import_error()}); "
+                            "used rule-based allocation. Install backend requirements (cvxpy) to enable it.")
+        else:
+            try:
+                orders, funding_sources, risk_notes, warnings, opt_meta = _orders_by_optimizer(
+                    ds, action, sectors, amount, investable, returns)
+            except Exception as exc:  # solver / feasibility issue -> fall back
+                method_used = "rules"
+                orders, funding_sources, risk_notes, warnings = _orders_by_rules(
+                    ds, action, sectors, amount, investable, target)
+                warnings.append(f"Convex optimization failed ({exc}); fell back to rule-based allocation.")
+    else:
+        orders, funding_sources, risk_notes, warnings = _orders_by_rules(
+            ds, action, sectors, amount, investable, target)
+
+    # Annotate every order with its forecast expected 1-month return.
+    for o in orders:
+        o["expected_return"] = round(returns.get(o["ticker"], forecast.expected_return(o["ticker"])), 4)
+
     compliance = _compliance_checks(ds, orders, sectors)
     risks = _risk_flags(ds, orders, risk_notes, horizon)
 
@@ -447,7 +678,11 @@ def generate_plan(fund_id, intent):
         "intent": {"action": action, "target": target, "targets": raw_targets,
                    "resolved_sector": sectors[0] if len(sectors) == 1 else None,
                    "resolved_sectors": sectors,
-                   "amount_cr": intent.get("amount_cr"), "horizon_days": horizon, "note": intent.get("note")},
+                   "amount_cr": intent.get("amount_cr"), "horizon_days": horizon, "note": intent.get("note"),
+                   "method": requested_method},
+        "allocation_method": method_used,
+        "optimization": opt_meta,
+        "forecast": forecast.summary(ds),
         "cash_flow_planning": cfp,
         "pending_trades": pending,
         "pending_net_cr": round(sum(t["cash_impact"] for t in ds["pending_trades"]) / CRORE, 2),

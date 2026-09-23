@@ -7,6 +7,17 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
 
 
+class ManualSelection(BaseModel):
+    ticker: str
+    side: Literal["BUY", "SELL"]
+    amount_cr: float = Field(..., ge=0)
+
+
+class ManualSectorSelection(BaseModel):
+    sector: str
+    amount_cr: float = Field(..., ge=0)
+
+
 class IntentRequest(BaseModel):
     """A Portfolio Manager's investment intent."""
 
@@ -24,10 +35,22 @@ class IntentRequest(BaseModel):
         description="One or more sectors to increase/decrease together; the amount is "
                     "split across them. Takes precedence over `target` when provided.",
     )
+    manual_selections: Optional[list[ManualSelection]] = Field(
+        None, description="Securities and BUY/SELL choices used when method is 'manual'."
+    )
+    manual_sector_selections: Optional[list[ManualSectorSelection]] = Field(
+        None, description="Sectors and amounts used for manual sector allocation."
+    )
     amount_cr: Optional[float] = Field(
         None, ge=0, description="Amount in Rs crore (not required for rebalance)."
     )
     horizon_days: int = Field(5, ge=1, le=30, description="Planning horizon (business days).")
+    method: Literal["manual", "rules", "optimize"] = Field(
+        "optimize",
+        description="Allocation method: 'manual' (use selected securities), 'rules' "
+                    "(heuristic drift/target logic), or 'optimize' (forecast-driven convex "
+                    "optimization via CVXPY). Compliance & risk rules run on the result either way.",
+    )
     note: Optional[str] = Field(None, description="Free-text note from the PM.")
     fund_id: Optional[str] = Field(None, description="Fund to plan for (defaults to the default fund).")
 

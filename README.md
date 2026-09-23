@@ -64,6 +64,16 @@ so no extra config is needed.
 ## Notes
 
 - All data is **synthetic and for demonstration only** — not investment advice.
-- The forecasting/optimization here is deterministic and rule-based; the
-  production design substitutes ML models (SARIMA / LSTM / TFT) and a convex
-  optimizer. Data and models are pluggable — this scaffold is the starting point.
+- Each plan can be built three ways, chosen per request (a toggle in the UI):
+  - **Manual** — select securities or sectors, choose BUY/SELL where applicable, and enter an amount for each selection.
+  - **Rules-Based** — deterministic drift/target heuristics (the original engine).
+  - **Convex Optimization** — a forecast-driven CVXPY optimizer decides the
+    allocation using predicted 1-month returns, then the **same** compliance and
+    risk rules run on the result.
+  Convex Optimization is the default; Manual and Rules-Based remain available as explicit choices.
+- The return forecast is currently a **placeholder** ([backend/app/forecast.py](backend/app/forecast.py))
+  returning dummy expected returns in the shape the production TFT model will
+  produce; swap in the real model without touching the rest of the app. The
+  convex engine ([backend/app/optimizer.py](backend/app/optimizer.py)) is adapted
+  from the `mozart` prototype. Data and models are pluggable — this scaffold is
+  the starting point.
