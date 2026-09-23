@@ -1,0 +1,3 @@
+/* Base reset — MUI CssBaseline + theme handle the rest. */
+html, body, #root { height: 100%; }
+body { margin: 0; }
