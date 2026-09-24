@@ -109,6 +109,27 @@ FUND_SPECS_V2 = {
             "risk_grade": "Very High",
         },
         "holdings_list": _HDFC_HOLDINGS,
+        "pending": [
+            ("PT-10231", "INFY",      "BUY",  40_000,  2072, 0, 1, "Unsettled"),
+            ("PT-10232", "HDFCBANK", "SELL", 300_000, 1617, 0, 1, "Unsettled"),
+            ("PT-10233", "RELIANCE",  "BUY",  25_000,  3097, -1, 2, "Unsettled"),
+            ("PT-10234", "LT",        "SELL", 100_000, 3720, 0, 1, "Unsettled"),
+            ("PT-10235", "ICICIBANK", "BUY",  20_000,  1196, -1, 2, "Unsettled"),
+        ],
+        "executed": [
+            ("EX-10188", "ICICIBANK", "BUY",  60_000,  1196, -3, 1, "Settled"),
+            ("EX-10190", "SBIN",      "BUY",  120_000, 826,  -3, 1, "Settled"),
+            ("EX-10193", "RELIANCE",  "SELL", 200_000, 3097, -2, 1, "Settled"),
+            ("EX-10195", "MARUTI",    "BUY",  4_000,   13500, -2, 1, "Settled"),
+            ("EX-10199", "BHARTIARTL","BUY",  30_000,  1689, -1, 1, "Settled"),
+        ],
+        "corp": [
+            ("RELIANCE", "Dividend", 10.0, 3, 10),
+            ("INFY",     "Dividend", 18.0, 2, 9),
+            ("ITC",      "Dividend", 6.5,  5, 12),
+            ("TCS",      "Dividend", 27.0, 6, 14),
+            ("HDFCBANK", "Dividend", 19.5, 8, 16),
+        ],
     },
     "ICICIPRU-LARGECAP-DG": {
         "meta": {
@@ -125,6 +146,24 @@ FUND_SPECS_V2 = {
             "risk_grade": "Very High",
         },
         "holdings_list": _ICICI_HOLDINGS,
+        "pending": [
+            ("PT-22101", "HDFCBANK", "BUY",  90_000,  1617, 0, 1, "Unsettled"),
+            ("PT-22102", "RELIANCE", "SELL", 400_000, 3097, 0, 1, "Unsettled"),
+            ("PT-22103", "MARUTI",   "BUY",  6_000,   13500, -1, 2, "Unsettled"),
+            ("PT-22104", "INFY",     "BUY",  50_000,  2072, 0, 1, "Unsettled"),
+        ],
+        "executed": [
+            ("EX-22050", "ICICIBANK", "BUY",  500_000, 1196, -3, 1, "Settled"),
+            ("EX-22052", "LT",        "BUY",  800_000, 3720, -2, 1, "Settled"),
+            ("EX-22055", "RELIANCE",  "SELL", 60_000,  3097, -2, 1, "Settled"),
+            ("EX-22058", "AXISBANK",  "BUY",  120_000, 1048, -1, 1, "Settled"),
+        ],
+        "corp": [
+            ("RELIANCE", "Dividend", 10.0, 3, 10),
+            ("INFY",     "Dividend", 18.0, 2, 9),
+            ("ITC",      "Dividend", 6.5,  5, 12),
+            ("HDFCBANK", "Dividend", 19.5, 8, 16),
+        ],
     },
 }
 
@@ -195,10 +234,44 @@ def _build_ds_v2(spec: dict) -> dict:
 
     by_ticker = {h["ticker"]: h for h in holdings}
 
-    # No pending/executed/corp actions in real data
-    pending = []
-    executed = []
+    def _trade(t):
+        tid, tk, side, shares, price, trade_off, settle_days, status = t
+        h = by_ticker.get(tk)
+        gross = shares * price
+        return {
+            "trade_id": tid,
+            "ticker": tk,
+            "name": h["name"] if h else tk,
+            "side": side,
+            "shares": shares,
+            "price": price,
+            "gross_value": gross,
+            "cash_impact": -gross if side == "BUY" else gross,
+            "trade_date": add_business_days(TODAY, trade_off).isoformat(),
+            "settlement_date": add_business_days(TODAY, trade_off + settle_days).isoformat(),
+            "settlement_days": settle_days,
+            "cycle": f"T+{settle_days}",
+            "status": status,
+        }
+
+    pending = [_trade(t) for t in spec.get("pending", [])]
+    executed = [_trade(t) for t in spec.get("executed", [])]
+
     corp = []
+    for tk, kind, dps, ex_off, pay_off in spec.get("corp", []):
+        h = by_ticker.get(tk)
+        shares = h["shares"] if h else 0
+        corp.append({
+            "ticker": tk,
+            "name": h["name"] if h else tk,
+            "type": kind,
+            "per_share": dps,
+            "shares_held": shares,
+            "cash_amount": shares * dps,
+            "ex_date": add_business_days(TODAY, ex_off).isoformat(),
+            "pay_date": add_business_days(TODAY, pay_off).isoformat(),
+            "pay_offset_days": pay_off,
+        })
 
     # Minimal expense breakdown (unknown from disclosure)
     ter = spec["meta"].get("expense_ratio")
@@ -210,7 +283,6 @@ def _build_ds_v2(spec: dict) -> dict:
         "components": [],
     }
 
-    # No event calendar from real data
     events = []
 
     fund = dict(spec["meta"])
