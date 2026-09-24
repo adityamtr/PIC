@@ -51,7 +51,7 @@ def health():
 
 @app.get("/api/funds")
 def get_funds():
-    return {"funds": data.list_funds() + data_v2.list_funds(), "default": data.DEFAULT_FUND_ID}
+    return {"funds": data.list_funds() + data_v2.list_funds(), "default": data_v2.DEFAULT_FUND_ID_V2}
 
 
 @app.get("/api/fund")
