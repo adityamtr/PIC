@@ -54,6 +54,16 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# ---------- ML models / checkpoints ----------
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.h5
+*.pkl
+/models/
+lightning_logs/
+
 # ---------- Misc ----------
 *.tmp
 *.bak
