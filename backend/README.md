@@ -31,6 +31,7 @@ uvicorn app.main:app --reload --port 8000
 | `app/data.py` | Synthetic dataset (fund, holdings, cash, pending trades, lock-ins, compliance limits, corporate actions, expense, universe, events). Replace with live feeds later. |
 | `app/forecast.py` | **Return-forecasting placeholder** — dummy expected 1-month returns per stock, in the shape the production TFT model will produce. Swap the body of `predict_returns` for real inference later. |
 | `app/optimizer.py` | **Convex-optimization engine (CVXPY)**, adapted from the `mozart` prototype: `optimize_buy` / `optimize_sell` / `optimize_rebalance`. Optional dependency — if `cvxpy` is missing the planner falls back to rules. |
+| `app/policy.py` | Proposed pre-trade policy evaluator for mandate, liquidity, concentration, corporate-action, restriction, ESG, country, cash-flow, and plan-creation rules. Dummy thresholds are versioned in the generated plan. |
 | `app/planner.py` | Cash-flow planning, funding, order generation (rule-based **or** forecast-driven convex optimization), compliance checks, risk flags, recommendation. |
 | `app/schemas.py` | Pydantic request/response models. |
 | `app/main.py` | FastAPI app & routes. |

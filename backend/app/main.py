@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import data, data_v2, planner
+from . import data_v2, planner
 from .schemas import DecisionRequest, DecisionResponse, IntentRequest
 
 app = FastAPI(
@@ -35,13 +35,11 @@ _PLANS: dict[str, dict] = {}
 
 
 def _to_cr(value):
-    return round(value / data.CRORE, 2)
+    return round(value / data_v2.CRORE, 2)
 
 
 def _ds(fund_id):
-    if fund_id in data_v2.FUNDS_V2:
-        return data_v2.get_ds(fund_id)
-    return data.get_ds(fund_id)
+    return data_v2.get_ds(fund_id)
 
 
 @app.get("/api/health")
@@ -51,7 +49,7 @@ def health():
 
 @app.get("/api/funds")
 def get_funds():
-    return {"funds": data.list_funds() + data_v2.list_funds(), "default": data_v2.DEFAULT_FUND_ID_V2}
+    return {"funds": data_v2.list_funds(), "default": data_v2.DEFAULT_FUND_ID_V2}
 
 
 @app.get("/api/fund")
@@ -69,7 +67,7 @@ def get_holdings(fund_id: str | None = Query(None)):
     ds = _ds(fund_id)
     rows = [{**h, "market_value_cr": _to_cr(h["market_value"]),
              "has_lock_in": h["locked_shares"] > 0} for h in ds["holdings"]]
-    return {"as_of": data.TODAY.isoformat(), "count": len(rows), "holdings": rows}
+    return {"as_of": data_v2.TODAY.isoformat(), "count": len(rows), "holdings": rows}
 
 
 @app.get("/api/sector-exposure")
@@ -132,7 +130,8 @@ def get_corporate_actions(fund_id: str | None = Query(None)):
 def get_compliance_limits(fund_id: str | None = Query(None)):
     ds = _ds(fund_id)
     compliance_mod = data_v2 if ds["id"] in data_v2.FUNDS_V2 else data
-    return {"limits": compliance_mod.COMPLIANCE_LIMITS, "utilization": compliance_mod.compliance_utilization(ds)}
+    limits = compliance_mod.get_fund_compliance_limits(ds["id"]) if hasattr(compliance_mod, "get_fund_compliance_limits") else compliance_mod.COMPLIANCE_LIMITS
+    return {"limits": limits, "utilization": compliance_mod.compliance_utilization(ds)}
 
 
 @app.get("/api/fund-expense")
@@ -140,7 +139,7 @@ def get_fund_expense(fund_id: str | None = Query(None)):
     ds = _ds(fund_id)
     e = ds["fund_expense"]
     return {"expense_ratio": e["expense_ratio"], "annual_expense_cr": _to_cr(e["annual_expense"]),
-            "daily_accrual_cr": round(e["daily_accrual"] / data.CRORE, 4),
+            "daily_accrual_cr": round(e["daily_accrual"] / data_v2.CRORE, 4),
             "monthly_accrual_cr": _to_cr(e["monthly_accrual"]),
             "components": [{"component": c["component"], "bps": c["bps"],
                             "annual_amount_cr": _to_cr(c["annual_amount"])} for c in e["components"]]}
@@ -164,7 +163,7 @@ def get_event_calendar(fund_id: str | None = Query(None)):
 
 @app.get("/api/universe")
 def get_universe():
-    return {"universe": data.UNIVERSE}
+    return {"universe": []}
 
 
 # --------------------------------------------------------------------------- #

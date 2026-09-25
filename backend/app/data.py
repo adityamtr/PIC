@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+from .security_metadata import curate_security_metadata
+
 CRORE = 10_000_000
 
 
@@ -69,6 +71,13 @@ UNIVERSE = [
     {"ticker": "SUNPHARMA","name": "Sun Pharmaceutical Ind",   "sector": "Healthcare",             "price": 1869,  "adv_cr": 480},
     {"ticker": "CIPLA",   "name": "Cipla Ltd",                 "sector": "Healthcare",             "price": 1550,  "adv_cr": 360},
 ]
+
+for _universe_security in UNIVERSE:
+    _universe_security.update(curate_security_metadata(
+        _universe_security["ticker"], _universe_security["sector"],
+        _universe_security["adv_cr"] * CRORE, _universe_security["price"], TODAY,
+        adv_cr=_universe_security["adv_cr"],
+    ))
 
 BUY_ALLOCATION = {
     "Information Technology": {"INFY": 0.35, "TCS": 0.30, "HCLTECH": 0.15, "LTIM": 0.12, "TECHM": 0.08},
@@ -251,6 +260,10 @@ def _build_ds(spec: dict) -> dict:
             "lock_in_expiry": add_business_days(TODAY, lock_off).isoformat() if lock_off else None,
             "lock_in_reason": lock_reason,
         })
+        holdings[-1].update(curate_security_metadata(
+            tk, sector, mv, price, TODAY,
+            adv_cr=next((u["adv_cr"] for u in UNIVERSE if u["ticker"] == tk), None),
+        ))
 
     equity = sum(h["market_value"] for h in holdings)
     aum = equity + cash_total
@@ -286,6 +299,7 @@ def _build_ds(spec: dict) -> dict:
             "ex_date": add_business_days(TODAY, ex_off).isoformat(),
             "pay_date": add_business_days(TODAY, pay_off).isoformat(),
             "pay_offset_days": pay_off,
+            "status": "declared", "confidence": 0.95, "source": "curated_demo",
         })
 
     ter = spec["meta"]["expense_ratio"]
@@ -318,6 +332,8 @@ def _build_ds(spec: dict) -> dict:
                  "currency": "INR"},
         "pending_trades": pending, "executed_trades": executed,
         "corporate_actions": corp, "fund_expense": expense, "event_calendar": events,
+        "restricted_securities": [], "watchlist_securities": [],
+        "policy_data_as_of": TODAY.isoformat(),
     }
 
 
