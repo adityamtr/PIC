@@ -81,10 +81,18 @@ def _solve_continuous(prob):
 # --------------------------------------------------------------------------- #
 # Buy: deploy `amount` to maximize expected return of deployed capital
 # --------------------------------------------------------------------------- #
-def optimize_buy(candidates, amount, aum, issuer_cap_frac, max_name_frac=0.34):
+def optimize_buy(candidates, amount, aum, issuer_cap_frac, max_name_frac=0.34,
+                 sector_cap_frac=None, sector_current=None, cap_aum=None):
     """
-    candidates: list of {ticker, price, current_value, expected_return}
+    candidates: list of {ticker, price, current_value, expected_return, sector}
     amount:     rupees to deploy
+    cap_aum:    AUM basis for the concentration caps. For a contribution this is
+                the post-trade AUM (pre-trade AUM + deployed cash) so the caps
+                match the policy check, which measures exposure against the
+                post-trade book. Defaults to `aum`.
+    sector_cap_frac / sector_current: if given, no sector's post-trade value may
+                exceed sector_cap_frac of cap_aum. `sector_current` is the fund's
+                existing rupee value per sector (across all holdings).
     Returns (allocations, meta) where allocations = [{ticker, rupees}] for the
     names the optimizer chose to buy.
     """
@@ -97,21 +105,36 @@ def optimize_buy(candidates, amount, aum, issuer_cap_frac, max_name_frac=0.34):
     cur = np.array([c["current_value"] for c in candidates], dtype=float) / _UNIT   # crore
     price = np.array([c["price"] for c in candidates], dtype=float)                 # rupees/share
     amount_u = amount / _UNIT
-    issuer_cap_u = issuer_cap_frac * aum / _UNIT
+    cap_basis = (cap_aum if cap_aum is not None else aum)
+    issuer_cap_u = issuer_cap_frac * cap_basis / _UNIT
+    sectors = [c.get("sector") for c in candidates]
+    sector_current = sector_current or {}
 
     buy = cp.Variable(n, nonneg=True)  # crore deployed per name
 
-    def _build(with_name_cap):
+    def _build(with_name_cap, with_sector_cap):
         cons = [cp.sum(buy) == amount_u, cur + buy <= issuer_cap_u]
         if with_name_cap:
             cons.append(buy <= max_name_frac * amount_u)
+        if with_sector_cap and sector_cap_frac:
+            sector_cap_u = sector_cap_frac * cap_basis / _UNIT
+            for s in sorted({x for x in sectors if x is not None}):
+                idx = [i for i, x in enumerate(sectors) if x == s]
+                cur_sector_u = sector_current.get(s, 0.0) / _UNIT
+                cons.append(cur_sector_u + cp.sum(buy[idx]) <= sector_cap_u)
         return cp.Problem(cp.Maximize(ret @ buy), cons)
 
-    prob = _build(with_name_cap=True)
+    prob = _build(with_name_cap=True, with_sector_cap=True)
     solver, status = _solve_continuous(prob)
     if status not in _OK:
-        # Diversification cap may make it infeasible for large tickets; relax it.
-        prob = _build(with_name_cap=False)
+        # Diversification cap may make it infeasible for large tickets; relax the
+        # per-name cap first, keeping the compliance issuer/sector caps.
+        prob = _build(with_name_cap=False, with_sector_cap=True)
+        solver, status = _solve_continuous(prob)
+    if status not in _OK:
+        # Last resort: drop the sector cap so a plan is still produced; the
+        # policy layer will surface any residual sector breach for review.
+        prob = _build(with_name_cap=False, with_sector_cap=False)
         solver, status = _solve_continuous(prob)
     if status not in _OK:
         raise OptimizationFailed(f"buy optimization status: {status}")
