@@ -15,10 +15,11 @@ It RECOMMENDS. It does not decide — every plan comes back as
 
 from __future__ import annotations
 
+import math
 import uuid
 from datetime import datetime, timezone
 
-from . import data, forecast, optimizer
+from . import data, data_v2, forecast, optimizer
 
 CRORE = data.CRORE
 
@@ -42,6 +43,12 @@ def resolve_sector(target):
     if not target:
         return None
     return _SECTOR_ALIASES.get(target.strip().lower())
+
+
+def _get_ds(fund_id):
+    if fund_id in data_v2.FUNDS_V2:
+        return data_v2.get_ds(fund_id)
+    return data.get_ds(fund_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -81,6 +88,10 @@ def _order(ds, ticker, side, rupees=None, shares=None):
     }
 
 
+def _usable_price(price):
+    return isinstance(price, (int, float)) and math.isfinite(price) and price > 0
+
+
 # --------------------------------------------------------------------------- #
 # 1. Cash-flow planning
 # --------------------------------------------------------------------------- #
@@ -90,7 +101,7 @@ def cash_flow_planning(ds, horizon_days):
     pending_net = sum(t["cash_impact"] for t in ds["pending_trades"])
     dividends = sum(ca["cash_amount"] for ca in ds["corporate_actions"]
                     if ca["pay_offset_days"] <= horizon_days)
-    expenses = ds["fund_expense"]["daily_accrual"] * horizon_days
+    expenses = (ds["fund_expense"].get("daily_accrual") or 0.0) * horizon_days
     est_subs = 0.0008 * ds["aum"]
     est_reds = 0.0006 * ds["aum"]
     net_flows = est_subs - est_reds
@@ -141,6 +152,8 @@ def _funding_sells(ds, gap, exclude_sectors=None):
     for h in candidates:
         if remaining <= 0:
             break
+        if not h["price"] or h["sellable_shares"] <= 0:
+            continue
         sellable_value = h["sellable_shares"] * h["price"]
         shares = int(min(remaining, sellable_value) // h["price"])
         if shares <= 0:
@@ -468,6 +481,8 @@ def _buy_candidates(ds, sectors, returns):
     for h in ds["holdings"]:
         if sectors and h["sector"] not in sectors:
             continue
+        if not _usable_price(h["price"]):
+            continue
         seen.add(h["ticker"])
         out.append({"ticker": h["ticker"], "price": h["price"],
                     "current_value": h["market_value"], "expected_return": returns.get(h["ticker"], 0.0)})
@@ -487,7 +502,9 @@ def _sell_candidates(ds, sectors, returns):
     return [{"ticker": h["ticker"], "price": h["price"], "sellable_shares": h["sellable_shares"],
              "expected_return": returns.get(h["ticker"], 0.0)}
             for h in ds["holdings"]
-            if (not sectors or h["sector"] in sectors) and h["sellable_shares"] > 0]
+            if (not sectors or h["sector"] in sectors)
+            and h["sellable_shares"] > 0
+            and _usable_price(h["price"])]
 
 
 def _orders_by_optimizer(ds, action, sectors, amount, investable, returns):
@@ -508,20 +525,21 @@ def _orders_by_optimizer(ds, action, sectors, amount, investable, returns):
             orders.append({**_order(ds, a["ticker"], "BUY", shares=a["shares"]),
                            "reason": "Convex-optimized to maximize forecast return"})
         buy_total = sum(o["est_value"] for o in orders)
-        gap = buy_total - investable
-        if gap > 0:
-            sells, notes = _funding_sells(ds, gap, exclude_sectors=sectors or None)
-            funding_sources, orders = sells, orders + sells
-            risk_notes.extend(notes)
-            warnings.append(f"Purchase exceeds investable cash by ~Rs {gap / CRORE:,.1f} Cr; funded by trimming holdings.")
-        elif action == "contribution":
+        if action == "contribution":
             funding_sources = [{"ticker": "INFLOW", "name": "Contribution / subscription inflow",
                                 "sector": "Cash", "side": "IN", "shares": 0, "price": 0,
                                 "est_value": amount, "reason": "New cash deployed by convex optimizer to maximize forecast return."}]
         else:
-            funding_sources = [{"ticker": "CASH", "name": "Available cash", "sector": "Cash",
-                                "side": "USE", "shares": 0, "price": 0, "est_value": buy_total,
-                                "reason": "Fully funded from investable cash."}]
+            gap = buy_total - investable
+            if gap > 0:
+                sells, notes = _funding_sells(ds, gap, exclude_sectors=sectors or None)
+                funding_sources, orders = sells, orders + sells
+                risk_notes.extend(notes)
+                warnings.append(f"Purchase exceeds investable cash by ~Rs {gap / CRORE:,.1f} Cr; funded by trimming holdings.")
+            else:
+                funding_sources = [{"ticker": "CASH", "name": "Available cash", "sector": "Cash",
+                                    "side": "USE", "shares": 0, "price": 0, "est_value": buy_total,
+                                    "reason": "Fully funded from investable cash."}]
 
     elif action in ("redemption", "decrease", "sell", "trim", "raise_cash"):
         sec = sectors if action in ("decrease", "sell", "trim") else None
@@ -543,7 +561,7 @@ def _orders_by_optimizer(ds, action, sectors, amount, investable, returns):
         for t in targets:
             h = data.holding(ds, t["ticker"])
             delta = t["delta_rupees"]
-            if abs(delta) < min_ticket or not h:
+            if abs(delta) < min_ticket or not h or not _usable_price(h["price"]):
                 continue
             if delta > 0:
                 shares = int(delta // h["price"])
@@ -566,7 +584,7 @@ def _orders_by_optimizer(ds, action, sectors, amount, investable, returns):
 # Public entry point
 # --------------------------------------------------------------------------- #
 def generate_plan(fund_id, intent):
-    ds = data.get_ds(fund_id)
+    ds = _get_ds(fund_id)
     action = (intent.get("action") or "contribution").lower()
     target = intent.get("target") or ""
     amount = float(intent.get("amount_cr") or 0) * CRORE

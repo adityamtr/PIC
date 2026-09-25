@@ -375,9 +375,9 @@ So we keep both calculation layers because they serve different purposes, but th
 
 # 6. Summary
 
-| Level | Series | Metrics | Primary Usage |
-|-------|--------|---------|---------------|
-| Stock | $P_t$ | annualized return, 1M/3M/6M return, volatility, drawdown, Sharpe, Sortino | ranking and stock selection |
-| Fund | $NAV_t$ | annualized return, 1M/3M/6M return, volatility, drawdown, Sharpe, Sortino | user risk/return sliders and portfolio constraints |
+| Level | Series    | Metrics                                                                   | Primary Usage                                      |
+| ----- | --------- | ------------------------------------------------------------------------- | -------------------------------------------------- |
+| Stock | $P_t$   | annualized return, 1M/3M/6M return, volatility, drawdown, Sharpe, Sortino | ranking and stock selection                        |
+| Fund  | $NAV_t$ | annualized return, 1M/3M/6M return, volatility, drawdown, Sharpe, Sortino | user risk/return sliders and portfolio constraints |
 
 The formulas are identical; only the input series changes. The optimization then combines both levels into one decision model.

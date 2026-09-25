@@ -8,7 +8,7 @@ function qs(fundId) {
 }
 
 async function get(path) {
-  const res = await fetch(`${BASE}${path}`)
+  const res = await fetch(`${BASE}${path}`, { cache: 'no-store' })
   if (!res.ok) throw new Error(`GET ${path} -> ${res.status}`)
   return res.json()
 }

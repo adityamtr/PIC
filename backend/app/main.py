@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import data, planner
+from . import data, data_v2, planner
 from .schemas import DecisionRequest, DecisionResponse, IntentRequest
 
 app = FastAPI(
@@ -39,6 +39,8 @@ def _to_cr(value):
 
 
 def _ds(fund_id):
+    if fund_id in data_v2.FUNDS_V2:
+        return data_v2.get_ds(fund_id)
     return data.get_ds(fund_id)
 
 
@@ -49,7 +51,7 @@ def health():
 
 @app.get("/api/funds")
 def get_funds():
-    return {"funds": data.list_funds(), "default": data.DEFAULT_FUND_ID}
+    return {"funds": data.list_funds() + data_v2.list_funds(), "default": data_v2.DEFAULT_FUND_ID_V2}
 
 
 @app.get("/api/fund")
@@ -129,7 +131,8 @@ def get_corporate_actions(fund_id: str | None = Query(None)):
 @app.get("/api/compliance-limits")
 def get_compliance_limits(fund_id: str | None = Query(None)):
     ds = _ds(fund_id)
-    return {"limits": data.COMPLIANCE_LIMITS, "utilization": data.compliance_utilization(ds)}
+    compliance_mod = data_v2 if ds["id"] in data_v2.FUNDS_V2 else data
+    return {"limits": compliance_mod.COMPLIANCE_LIMITS, "utilization": compliance_mod.compliance_utilization(ds)}
 
 
 @app.get("/api/fund-expense")
