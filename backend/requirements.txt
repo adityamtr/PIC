@@ -1,5 +1,20 @@
+# App runtime
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 pydantic==2.10.4
+
+# Convex optimization
 cvxpy==1.5.3
 numpy==1.26.4
+
+# Model training / notebook
+torch==2.14.0
+## pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu126 # {CUDA 12.6} For GPU training (check your cuda version and replace)
+pytorch-forecasting==1.8.0
+pytorch-lightning==2.6.6
+scikit-learn==1.9.1
+matplotlib==3.11.2
+plotly==7.1.0
+pandas==3.0.6
+jupyter==1.1.1
+setuptools==80.9.0
