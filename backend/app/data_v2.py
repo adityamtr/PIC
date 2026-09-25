@@ -1,5 +1,6 @@
 """
-Real-data dataset for two mutual funds: HDFC Flexi Cap and ICICI Prudential Large Cap.
+Real-data dataset for five mutual funds: HDFC Flexi Cap, ICICI Prudential Large Cap,
+SBI Nifty 50 ETF, HDFC Retirement Fund - Equity Plan, and Kotak Large & Mid Cap.
 
 Built from:
   - Raw disclosures (XLSX files)
@@ -34,6 +35,9 @@ TODAY = date.today()
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 HDFC_XLSX = REPO_ROOT / "data" / "raw" / "Funds Monthly Portfolio Disclosure(18 funds)" / "current" / "INF179K01UT0_HDFC Flexi Cap Fund.xlsx"
 ICICI_XLSX = REPO_ROOT / "data" / "raw" / "Funds Monthly Portfolio Disclosure(18 funds)" / "current" / "INF109K016L0_ICICI Prudential Large Cap Fund.xlsx"
+SBI_XLSX = REPO_ROOT / "data" / "raw" / "Funds Monthly Portfolio Disclosure(18 funds)" / "current" / "INF200KA1FS1_SBI Nifty 50 ETF.xlsx"
+HDFC_RETIREMENT_XLSX = REPO_ROOT / "data" / "raw" / "Funds Monthly Portfolio Disclosure(18 funds)" / "current" / "INF179KB1MF0_HDFC Retirement Fund - Equity Plan.xlsx"
+KOTAK_XLSX = REPO_ROOT / "data" / "raw" / "Funds Monthly Portfolio Disclosure(18 funds)" / "current" / "INF174K01LF9_Kotak Large & Mid Cap Fund.xlsx"
 PRICES_CSV = REPO_ROOT / "data" / "processed" / "final" / "stock_macro_monthly_target.csv"
 
 
@@ -52,6 +56,27 @@ def _load_icici_holdings() -> list[dict]:
     if not ICICI_XLSX.exists():
         raise FileNotFoundError(f"ICICI XLSX file not found: {ICICI_XLSX}")
     return xlsx_parser.parse_icici_largecap(ICICI_XLSX)
+
+
+def _load_sbi_holdings() -> list[dict]:
+    """Load SBI Nifty 50 ETF holdings from XLSX."""
+    if not SBI_XLSX.exists():
+        raise FileNotFoundError(f"SBI XLSX file not found: {SBI_XLSX}")
+    return xlsx_parser.parse_sbi_nifty50_etf(SBI_XLSX)
+
+
+def _load_hdfc_retirement_holdings() -> list[dict]:
+    """Load HDFC Retirement Fund - Equity Plan holdings from XLSX."""
+    if not HDFC_RETIREMENT_XLSX.exists():
+        raise FileNotFoundError(f"HDFC Retirement XLSX file not found: {HDFC_RETIREMENT_XLSX}")
+    return xlsx_parser.parse_hdfc_flexi_cap(HDFC_RETIREMENT_XLSX)
+
+
+def _load_kotak_holdings() -> list[dict]:
+    """Load Kotak Large & Mid Cap holdings from XLSX."""
+    if not KOTAK_XLSX.exists():
+        raise FileNotFoundError(f"Kotak XLSX file not found: {KOTAK_XLSX}")
+    return xlsx_parser.parse_kotak_largemidcap(KOTAK_XLSX)
 
 
 def _load_prices() -> dict:
@@ -87,6 +112,9 @@ def _load_prices() -> dict:
 # Load once at module init
 _HDFC_HOLDINGS = _load_hdfc_holdings()
 _ICICI_HOLDINGS = _load_icici_holdings()
+_SBI_HOLDINGS = _load_sbi_holdings()
+_HDFC_RETIREMENT_HOLDINGS = _load_hdfc_retirement_holdings()
+_KOTAK_HOLDINGS = _load_kotak_holdings()
 _PRICES_DICT = _load_prices()
 
 
@@ -104,7 +132,7 @@ FUND_SPECS_V2 = {
             "benchmark": "NIFTY 500 TRI",
             "fund_manager": "Unknown",
             "inception": "Unknown",
-            "nav": None,
+            "nav": 2260.5250,
             "expense_ratio": None,
             "risk_grade": "Very High",
         },
@@ -141,7 +169,7 @@ FUND_SPECS_V2 = {
             "benchmark": "NIFTY 100 TRI",
             "fund_manager": "Unknown",
             "inception": "Unknown",
-            "nav": None,
+            "nav": 117.5600,
             "expense_ratio": None,
             "risk_grade": "Very High",
         },
@@ -157,6 +185,111 @@ FUND_SPECS_V2 = {
             ("EX-22052", "LT",        "BUY",  800_000, 3720, -2, 1, "Settled"),
             ("EX-22055", "RELIANCE",  "SELL", 60_000,  3097, -2, 1, "Settled"),
             ("EX-22058", "AXISBANK",  "BUY",  120_000, 1048, -1, 1, "Settled"),
+        ],
+        "corp": [
+            ("RELIANCE", "Dividend", 10.0, 3, 10),
+            ("INFY",     "Dividend", 18.0, 2, 9),
+            ("ITC",      "Dividend", 6.5,  5, 12),
+            ("HDFCBANK", "Dividend", 19.5, 8, 16),
+        ],
+    },
+    "SBI-NIFTY50-ETF-DG": {
+        "meta": {
+            "fund_id": "SBI-NIFTY50-ETF-DG",
+            "name": "SBI Nifty 50 ETF",
+            "amc": "SBI Funds Management",
+            "category": "Exchange Traded Fund",
+            "plan": "Direct - Growth",
+            "benchmark": "NIFTY 50 TRI",
+            "fund_manager": "Unknown",
+            "inception": "Unknown",
+            "nav": 254.7696,
+            "expense_ratio": None,
+            "risk_grade": "High",
+        },
+        "holdings_list": _SBI_HOLDINGS,
+        "pending": [
+            ("PT-30101", "RELIANCE", "BUY",  50_000,  3097, 0, 1, "Unsettled"),
+            ("PT-30102", "TCS",      "BUY",  30_000,  4150, 0, 1, "Unsettled"),
+            ("PT-30103", "INFY",     "BUY",  25_000,  2072, 0, 1, "Unsettled"),
+            ("PT-30104", "HDFCBANK", "BUY",  20_000,  1617, 0, 1, "Unsettled"),
+            ("PT-30105", "ICICIBANK", "BUY",  15_000,  1196, 0, 1, "Unsettled"),
+        ],
+        "executed": [
+            ("EX-30050", "RELIANCE", "BUY",  100_000, 3097, -3, 1, "Settled"),
+            ("EX-30052", "TCS",      "BUY",   60_000, 4150, -2, 1, "Settled"),
+            ("EX-30055", "INFY",     "SELL",  40_000, 2072, -2, 1, "Settled"),
+            ("EX-30058", "HDFCBANK", "BUY",   30_000, 1617, -1, 1, "Settled"),
+        ],
+        "corp": [
+            ("RELIANCE", "Dividend", 10.0, 3, 10),
+            ("TCS",      "Dividend", 12.0, 4, 11),
+            ("INFY",     "Dividend", 18.0, 2, 9),
+            ("HDFCBANK", "Dividend", 19.5, 8, 16),
+        ],
+    },
+    "HDFC-RETIREMENT-EQUITY-DG": {
+        "meta": {
+            "fund_id": "HDFC-RETIREMENT-EQUITY-DG",
+            "name": "HDFC Retirement Fund - Equity Plan",
+            "amc": "HDFC Asset Management Company",
+            "category": "Retirement - Equity",
+            "plan": "Direct - Growth",
+            "benchmark": "NIFTY 500 TRI",
+            "fund_manager": "Unknown",
+            "inception": "Unknown",
+            "nav": 55.3060,
+            "expense_ratio": None,
+            "risk_grade": "Very High",
+        },
+        "holdings_list": _HDFC_RETIREMENT_HOLDINGS,
+        "pending": [
+            ("PT-50101", "RELIANCE", "BUY",  60_000,  3097, 0, 1, "Unsettled"),
+            ("PT-50102", "ICICIBANK", "BUY",  40_000,  1196, 0, 1, "Unsettled"),
+            ("PT-50103", "HDFCBANK", "BUY",  30_000,  1617, 0, 1, "Unsettled"),
+            ("PT-50104", "INFY",     "BUY",  25_000,  2072, 0, 1, "Unsettled"),
+            ("PT-50105", "TCS",      "BUY",  20_000,  4150, 0, 1, "Unsettled"),
+        ],
+        "executed": [
+            ("EX-50050", "RELIANCE", "BUY",  120_000, 3097, -3, 1, "Settled"),
+            ("EX-50052", "ICICIBANK", "BUY",   80_000, 1196, -3, 1, "Settled"),
+            ("EX-50055", "HDFCBANK", "SELL",  60_000, 1617, -2, 1, "Settled"),
+            ("EX-50058", "INFY",     "BUY",   50_000, 2072, -1, 1, "Settled"),
+        ],
+        "corp": [
+            ("RELIANCE", "Dividend", 10.0, 3, 10),
+            ("INFY",     "Dividend", 18.0, 2, 9),
+            ("ITC",      "Dividend", 6.5,  5, 12),
+            ("HDFCBANK", "Dividend", 19.5, 8, 16),
+        ],
+    },
+    "KOTAK-LARGEMIDCAP-DG": {
+        "meta": {
+            "fund_id": "KOTAK-LARGEMIDCAP-DG",
+            "name": "Kotak Large & Mid Cap Fund",
+            "amc": "Kotak Mahindra Asset Management",
+            "category": "Equity - Large & Mid Cap",
+            "plan": "Direct - Growth",
+            "benchmark": "NIFTY LARGE MIDCAP 250 TRI",
+            "fund_manager": "Unknown",
+            "inception": "Unknown",
+            "nav": 406.1990,
+            "expense_ratio": None,
+            "risk_grade": "Very High",
+        },
+        "holdings_list": _KOTAK_HOLDINGS,
+        "pending": [
+            ("PT-50101", "RELIANCE", "BUY",  60_000,  3097, 0, 1, "Unsettled"),
+            ("PT-50102", "LT",       "BUY",  40_000,  3720, 0, 1, "Unsettled"),
+            ("PT-50103", "SBIN",     "BUY",  30_000,  826,  0, 1, "Unsettled"),
+            ("PT-50104", "BHARTIARTL","BUY",  25_000,  1689, 0, 1, "Unsettled"),
+            ("PT-50105", "MARUTI",   "BUY",  20_000, 13500, 0, 1, "Unsettled"),
+        ],
+        "executed": [
+            ("EX-50050", "RELIANCE", "BUY",  120_000, 3097, -3, 1, "Settled"),
+            ("EX-50052", "LT",       "BUY",   80_000, 3720, -2, 1, "Settled"),
+            ("EX-50055", "SBIN",     "SELL",  50_000,  826, -2, 1, "Settled"),
+            ("EX-50058", "MARUTI",   "BUY",   30_000,13500, -1, 1, "Settled"),
         ],
         "corp": [
             ("RELIANCE", "Dividend", 10.0, 3, 10),
