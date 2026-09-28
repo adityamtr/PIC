@@ -25,7 +25,10 @@ export default function App() {
   useEffect(() => { localStorage.setItem('pic-mode', mode) }, [mode])
   useEffect(() => {
     api.health().then(() => setApiUp(true)).catch(() => setApiUp(false))
-    api.funds().then((d) => { setFunds(d.funds); setFundId(d.default) }).catch(() => {})
+    api.funds().then((d) => {
+      setFunds(d.funds)
+      setFundId((current) => current || d.default)
+    }).catch(() => {})
   }, [])
 
   const toggleMode = () => setMode((m) => (m === 'light' ? 'dark' : 'light'))

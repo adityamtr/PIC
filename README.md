@@ -70,7 +70,7 @@ so no extra config is needed.
   - **Convex Optimization** — a forecast-driven CVXPY optimizer decides the
     allocation using predicted 1-month returns, then the **same** compliance and
     risk rules run on the result.
-  Convex Optimization is the default; Manual and Rules-Based remain available as explicit choices.
+    Convex Optimization is the default; Manual and Rules-Based remain available as explicit choices.
 - The return forecast is currently a **placeholder** ([backend/app/forecast.py](backend/app/forecast.py))
   returning dummy expected returns in the shape the production TFT model will
   produce; swap in the real model without touching the rest of the app. The

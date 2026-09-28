@@ -15,10 +15,11 @@ It RECOMMENDS. It does not decide — every plan comes back as
 
 from __future__ import annotations
 
+import math
 import uuid
 from datetime import datetime, timezone
 
-from . import data, forecast, optimizer
+from . import data, data_v2, forecast, optimizer, policy
 
 CRORE = data.CRORE
 
@@ -42,6 +43,12 @@ def resolve_sector(target):
     if not target:
         return None
     return _SECTOR_ALIASES.get(target.strip().lower())
+
+
+def _get_ds(fund_id):
+    if fund_id in data_v2.FUNDS_V2:
+        return data_v2.get_ds(fund_id)
+    return data.get_ds(fund_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -81,6 +88,18 @@ def _order(ds, ticker, side, rupees=None, shares=None):
     }
 
 
+def _usable_price(price):
+    return isinstance(price, (int, float)) and math.isfinite(price) and price > 0
+
+
+def _available_sellable_shares(ds, holding):
+    pending_sells = sum(
+        trade["shares"] for trade in ds.get("pending_trades", [])
+        if trade["ticker"] == holding["ticker"] and trade["side"] == "SELL"
+    )
+    return max(holding.get("sellable_shares", 0) - pending_sells, 0)
+
+
 # --------------------------------------------------------------------------- #
 # 1. Cash-flow planning
 # --------------------------------------------------------------------------- #
@@ -90,7 +109,7 @@ def cash_flow_planning(ds, horizon_days):
     pending_net = sum(t["cash_impact"] for t in ds["pending_trades"])
     dividends = sum(ca["cash_amount"] for ca in ds["corporate_actions"]
                     if ca["pay_offset_days"] <= horizon_days)
-    expenses = ds["fund_expense"]["daily_accrual"] * horizon_days
+    expenses = (ds["fund_expense"].get("daily_accrual") or 0.0) * horizon_days
     est_subs = 0.0008 * ds["aum"]
     est_reds = 0.0006 * ds["aum"]
     net_flows = est_subs - est_reds
@@ -119,12 +138,16 @@ def _build_buy_orders(ds, sector, amount):
     alloc = data.BUY_ALLOCATION.get(sector)
     orders = []
     if alloc:
-        for ticker, frac in alloc.items():
-            o = _order(ds, ticker, "BUY", rupees=amount * frac)
+        eligible = [(ticker, frac) for ticker, frac in alloc.items()
+                    if policy.buy_exclusion_reason(ds, ticker) is None]
+        total_frac = sum(frac for _, frac in eligible) or 1.0
+        for ticker, frac in eligible:
+            o = _order(ds, ticker, "BUY", rupees=amount * frac / total_frac)
             if o["shares"] > 0:
                 orders.append(o)
     else:
-        names = [h for h in ds["holdings"] if h["sector"] == sector]
+        names = [h for h in ds["holdings"] if h["sector"] == sector
+                 and policy.buy_exclusion_reason(ds, h["ticker"]) is None]
         total_w = sum(h["weight"] for h in names) or 1.0
         for h in names:
             o = _order(ds, h["ticker"], "BUY", rupees=amount * h["weight"] / total_w)
@@ -141,7 +164,10 @@ def _funding_sells(ds, gap, exclude_sectors=None):
     for h in candidates:
         if remaining <= 0:
             break
-        sellable_value = h["sellable_shares"] * h["price"]
+        available_shares = _available_sellable_shares(ds, h)
+        if not _usable_price(h["price"]) or available_shares <= 0:
+            continue
+        sellable_value = available_shares * h["price"]
         shares = int(min(remaining, sellable_value) // h["price"])
         if shares <= 0:
             continue
@@ -165,8 +191,10 @@ def build_contribution(ds, amount):
     aum = ds["aum"]
     rupees = {h["ticker"]: 0.0 for h in ds["holdings"]}
 
+    eligible_holdings = [h for h in ds["holdings"]
+                         if policy.buy_exclusion_reason(ds, h["ticker"]) is None]
     shortfalls = [(h, (h["target_weight"] - h["weight"]) / 100 * aum)
-                  for h in ds["holdings"] if h["weight"] < h["target_weight"]]
+                  for h in eligible_holdings if h["weight"] < h["target_weight"]]
     total_short = sum(s for _, s in shortfalls)
     fill = min(amount, total_short)
     if total_short > 0:
@@ -175,14 +203,14 @@ def build_contribution(ds, amount):
 
     remaining = amount - fill
     if remaining > 1:
-        tw_total = sum(h["target_weight"] for h in ds["holdings"]) or 1.0
-        for h in ds["holdings"]:
+        tw_total = sum(h["target_weight"] for h in eligible_holdings) or 1.0
+        for h in eligible_holdings:
             rupees[h["ticker"]] += remaining * h["target_weight"] / tw_total
 
     min_ticket = 0.5 * CRORE
     orders = []
     for tk, r in sorted(rupees.items(), key=lambda x: x[1], reverse=True):
-        if r < min_ticket:
+        if r < min_ticket or not _usable_price(_price_for(ds, tk)):
             continue
         shares = int(r // _price_for(ds, tk))
         if shares > 0:
@@ -217,9 +245,9 @@ def build_redemption(ds, amount):
     orders, notes = [], []
     for h in sorted(ds["holdings"], key=lambda x: rupees[x["ticker"]], reverse=True):
         r = rupees[h["ticker"]]
-        if r < min_ticket:
+        if r < min_ticket or not _usable_price(h["price"]):
             continue
-        sellable_value = h["sellable_shares"] * h["price"]
+        sellable_value = _available_sellable_shares(ds, h) * h["price"]
         shares = int(min(r, sellable_value) // h["price"])
         if shares <= 0 or shares * h["price"] < min_ticket:
             continue
@@ -240,6 +268,10 @@ def build_rebalance(ds):
     min_ticket = 0.25 * CRORE
     orders, notes = [], []
     for h in ds["holdings"]:
+        if policy.buy_exclusion_reason(ds, h["ticker"]) is not None:
+            continue
+        if not _usable_price(h["price"]):
+            continue
         delta = h["target_weight"] * scale / 100 * ds["aum"] - h["market_value"]
         if abs(delta) < min_ticket:
             continue
@@ -248,7 +280,7 @@ def build_rebalance(ds):
             if shares > 0:
                 orders.append(_order(ds, h["ticker"], "BUY", shares=shares))
         else:
-            sellable_value = h["sellable_shares"] * h["price"]
+            sellable_value = _available_sellable_shares(ds, h) * h["price"]
             shares = int(min(-delta, sellable_value) // h["price"])
             if shares > 0:
                 orders.append(_order(ds, h["ticker"], "SELL", shares=shares))
@@ -263,13 +295,25 @@ def build_rebalance(ds):
 # --------------------------------------------------------------------------- #
 def _compliance_checks(ds, orders, sectors=None):
     aum = ds["aum"]
-    lim = data.COMPLIANCE_LIMITS
+    lim = (data_v2.get_fund_compliance_limits(ds["id"])
+           if ds["id"] in data_v2.FUNDS_V2 else data.COMPLIANCE_LIMITS)
     checks = []
 
     delta = {}
     for o in orders:
         sign = 1 if o["side"] == "BUY" else -1
         delta[o["ticker"]] = delta.get(o["ticker"], 0.0) + sign * o["est_value"]
+
+    # Projected weights must divide by the post-trade AUM. New subscription cash
+    # deployed by a contribution raises AUM as well as the position value; using
+    # the pre-trade AUM inflates projected weights and manufactures false
+    # issuer/sector/group breaches on large flows.
+    net_flow = sum(delta.values())
+    post_aum = aum + net_flow if aum + net_flow > 0 else aum
+
+    def proj_pct(current_weight, value_delta):
+        current_value = current_weight / 100.0 * aum
+        return round((current_value + value_delta) / post_aum * 100, 2)
 
     def st(projected, limit):
         return "FAIL" if projected > limit else ("WARN" if projected >= 0.9 * limit else "PASS")
@@ -279,7 +323,7 @@ def _compliance_checks(ds, orders, sectors=None):
             continue
         h = data.holding(ds, ticker)
         current = h["weight"] if h else 0.0
-        projected = round(current + d / aum * 100, 2)
+        projected = proj_pct(current, d)
         checks.append({"code": "SEBI-10PCT", "rule": "Single issuer limit", "entity": ticker,
                        "current": current, "projected": projected, "limit": lim["single_issuer_limit"],
                        "status": st(projected, lim["single_issuer_limit"]),
@@ -288,7 +332,7 @@ def _compliance_checks(ds, orders, sectors=None):
     for sector in (sectors or []):
         buy_into = sum(d for tk, d in delta.items() if d > 0 and _sector_for(ds, tk) == sector)
         current = data.sector_weight(ds, sector)
-        projected = round(current + buy_into / aum * 100, 2)
+        projected = proj_pct(current, buy_into)
         checks.append({"code": "SECT-35PCT", "rule": "Sector concentration limit", "entity": sector,
                        "current": current, "projected": projected, "limit": lim["sector_soft_limit"],
                        "status": st(projected, lim["sector_soft_limit"]),
@@ -303,7 +347,7 @@ def _compliance_checks(ds, orders, sectors=None):
             group_delta[h["group"]] = group_delta.get(h["group"], 0.0) + d
     for grp, d in group_delta.items():
         current = data.group_weight(ds, grp)
-        projected = round(current + d / aum * 100, 2)
+        projected = proj_pct(current, d)
         status = st(projected, lim["group_limit"])
         if status != "PASS":
             checks.append({"code": "GRP-20PCT", "rule": "Group exposure limit", "entity": grp,
@@ -391,7 +435,8 @@ def _orders_by_rules(ds, action, sectors, amount, investable, target):
                 for h in names:
                     if remaining <= 0:
                         break
-                    shares = int(min(remaining, h["sellable_shares"] * h["price"]) // h["price"])
+                    available_value = _available_sellable_shares(ds, h) * h["price"]
+                    shares = int(min(remaining, available_value) // h["price"])
                     if shares <= 0:
                         continue
                     orders.append({**_order(ds, h["ticker"], "SELL", shares=shares),
@@ -468,26 +513,33 @@ def _buy_candidates(ds, sectors, returns):
     for h in ds["holdings"]:
         if sectors and h["sector"] not in sectors:
             continue
+        if not _usable_price(h["price"]):
+            continue
         seen.add(h["ticker"])
-        out.append({"ticker": h["ticker"], "price": h["price"],
+        out.append({"ticker": h["ticker"], "price": h["price"], "sector": h["sector"],
                     "current_value": h["market_value"], "expected_return": returns.get(h["ticker"], 0.0)})
     for u in data.UNIVERSE:
         if u["ticker"] in seen:
             continue
+        if policy.buy_exclusion_reason(ds, u["ticker"]) is not None:
+            continue
         if sectors and u["sector"] not in sectors:
             continue
         held = data.holding(ds, u["ticker"])
-        out.append({"ticker": u["ticker"], "price": u["price"],
+        out.append({"ticker": u["ticker"], "price": u["price"], "sector": u["sector"],
                     "current_value": held["market_value"] if held else 0.0,
                     "expected_return": returns.get(u["ticker"], 0.0)})
     return out
 
 
 def _sell_candidates(ds, sectors, returns):
-    return [{"ticker": h["ticker"], "price": h["price"], "sellable_shares": h["sellable_shares"],
+    return [{"ticker": h["ticker"], "price": h["price"],
+             "sellable_shares": _available_sellable_shares(ds, h),
              "expected_return": returns.get(h["ticker"], 0.0)}
             for h in ds["holdings"]
-            if (not sectors or h["sector"] in sectors) and h["sellable_shares"] > 0]
+            if (not sectors or h["sector"] in sectors)
+            and _available_sellable_shares(ds, h) > 0
+            and _usable_price(h["price"])]
 
 
 def _orders_by_optimizer(ds, action, sectors, amount, investable, returns):
@@ -503,25 +555,38 @@ def _orders_by_optimizer(ds, action, sectors, amount, investable, returns):
             warnings.append(f"Could not map target to a known sector; no buy orders generated.")
             return orders, funding_sources, risk_notes, warnings, opt_meta
         candidates = _buy_candidates(ds, sectors if action != "contribution" else None, returns)
-        allocations, opt_meta = optimizer.optimize_buy(candidates, amount, aum, _ISSUER_CAP_FRAC)
+        # Respect the fund's own mandate caps as hard optimizer constraints, and
+        # measure them against the post-trade AUM (a contribution grows AUM by
+        # the deployed cash) so the optimizer never proposes a breaching book.
+        lim = (data_v2.get_fund_compliance_limits(ds["id"])
+               if ds["id"] in data_v2.FUNDS_V2 else data.COMPLIANCE_LIMITS)
+        cap_aum = aum + amount if action == "contribution" else aum
+        sector_current = {}
+        for h in ds["holdings"]:
+            sector_current[h["sector"]] = sector_current.get(h["sector"], 0.0) + h["market_value"]
+        allocations, opt_meta = optimizer.optimize_buy(
+            candidates, amount, aum, lim["single_issuer_limit"] / 100,
+            sector_cap_frac=lim["sector_soft_limit"] / 100,
+            sector_current=sector_current, cap_aum=cap_aum)
         for a in allocations:
             orders.append({**_order(ds, a["ticker"], "BUY", shares=a["shares"]),
                            "reason": "Convex-optimized to maximize forecast return"})
         buy_total = sum(o["est_value"] for o in orders)
-        gap = buy_total - investable
-        if gap > 0:
-            sells, notes = _funding_sells(ds, gap, exclude_sectors=sectors or None)
-            funding_sources, orders = sells, orders + sells
-            risk_notes.extend(notes)
-            warnings.append(f"Purchase exceeds investable cash by ~Rs {gap / CRORE:,.1f} Cr; funded by trimming holdings.")
-        elif action == "contribution":
+        if action == "contribution":
             funding_sources = [{"ticker": "INFLOW", "name": "Contribution / subscription inflow",
                                 "sector": "Cash", "side": "IN", "shares": 0, "price": 0,
                                 "est_value": amount, "reason": "New cash deployed by convex optimizer to maximize forecast return."}]
         else:
-            funding_sources = [{"ticker": "CASH", "name": "Available cash", "sector": "Cash",
-                                "side": "USE", "shares": 0, "price": 0, "est_value": buy_total,
-                                "reason": "Fully funded from investable cash."}]
+            gap = buy_total - investable
+            if gap > 0:
+                sells, notes = _funding_sells(ds, gap, exclude_sectors=sectors or None)
+                funding_sources, orders = sells, orders + sells
+                risk_notes.extend(notes)
+                warnings.append(f"Purchase exceeds investable cash by ~Rs {gap / CRORE:,.1f} Cr; funded by trimming holdings.")
+            else:
+                funding_sources = [{"ticker": "CASH", "name": "Available cash", "sector": "Cash",
+                                    "side": "USE", "shares": 0, "price": 0, "est_value": buy_total,
+                                    "reason": "Fully funded from investable cash."}]
 
     elif action in ("redemption", "decrease", "sell", "trim", "raise_cash"):
         sec = sectors if action in ("decrease", "sell", "trim") else None
@@ -543,7 +608,7 @@ def _orders_by_optimizer(ds, action, sectors, amount, investable, returns):
         for t in targets:
             h = data.holding(ds, t["ticker"])
             delta = t["delta_rupees"]
-            if abs(delta) < min_ticket or not h:
+            if abs(delta) < min_ticket or not h or not _usable_price(h["price"]):
                 continue
             if delta > 0:
                 shares = int(delta // h["price"])
@@ -566,7 +631,7 @@ def _orders_by_optimizer(ds, action, sectors, amount, investable, returns):
 # Public entry point
 # --------------------------------------------------------------------------- #
 def generate_plan(fund_id, intent):
-    ds = data.get_ds(fund_id)
+    ds = _get_ds(fund_id)
     action = (intent.get("action") or "contribution").lower()
     target = intent.get("target") or ""
     amount = float(intent.get("amount_cr") or 0) * CRORE
@@ -583,6 +648,13 @@ def generate_plan(fund_id, intent):
         if s and s not in sectors:
             sectors.append(s)
     cfp = cash_flow_planning(ds, horizon)
+    # A contribution brings new subscription cash into the fund. Reflect it in
+    # the investable balance so the plan can deploy it and the cash-deployment
+    # policy check measures against the money that actually arrived.
+    if action == "contribution" and amount > 0:
+        cfp["subscription_amount"] = amount
+        cfp["investable_amount"] = cfp["investable_amount"] + amount
+        cfp["line_items"].append({"label": "New subscription (this plan)", "amount": amount})
     investable = cfp["investable_amount"]
 
     # Forecast expected 1-month returns (TFT placeholder). Used by the convex
@@ -653,15 +725,24 @@ def generate_plan(fund_id, intent):
 
     compliance = _compliance_checks(ds, orders, sectors)
     risks = _risk_flags(ds, orders, risk_notes, horizon)
+    policy_result = policy.evaluate(ds, orders, cfp, horizon)
+    risks.extend(policy_result["risk_flags"])
+    warnings.extend(policy_result["warnings"])
 
     total_buy = sum(o["est_value"] for o in orders if o["side"] == "BUY")
     total_sell = sum(o["est_value"] for o in orders if o["side"] == "SELL")
     net_cash = total_sell - total_buy
 
     has_fail = any(c["status"] == "FAIL" for c in compliance)
-    has_warn = any(c["status"] == "WARN" for c in compliance) or any(r["severity"] == "HIGH" for r in risks)
-    if has_fail:
-        recommendation = "Plan breaches one or more compliance limits. Recommend MODIFY or ESCALATE before execution."
+    has_policy_block = policy_result["status"] == "BLOCK"
+    has_policy_escalation = policy_result["status"] == "ESCALATE"
+    has_warn = (any(c["status"] == "WARN" for c in compliance)
+                or any(r["severity"] == "HIGH" for r in risks)
+                or policy_result["status"] == "WARN")
+    if has_fail or has_policy_block:
+        recommendation = "Plan is blocked by one or more policy or compliance limits. Recommend MODIFY or ESCALATE before execution."
+    elif has_policy_escalation:
+        recommendation = "Plan requires Compliance/PIC escalation because mandatory policy data or review is incomplete."
     elif has_warn:
         recommendation = "Plan is executable but has items near limits / elevated execution risk. Recommend REVIEW carefully, then APPROVE with monitoring."
     else:
@@ -695,6 +776,13 @@ def generate_plan(fund_id, intent):
             "total_sell_value": total_sell, "net_cash_impact": net_cash,
             "investable_amount": investable,
             "compliance_status": "FAIL" if has_fail else ("WARN" if has_warn else "PASS"),
+            "policy_status": policy_result["status"],
+            "execution_allowed": policy_result["execution_allowed"] and not has_fail,
         },
+        "policy_checks": policy_result["checks"],
+        "policy_summary": policy_result["summary"],
+        "policy_version": policy_result["policy_version"],
+        "policy_status": policy_result["status"],
+        "execution_allowed": policy_result["execution_allowed"] and not has_fail,
         "warnings": warnings, "recommendation": recommendation, "status": "Pending PIC Review",
     }
