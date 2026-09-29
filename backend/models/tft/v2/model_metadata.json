@@ -1,6 +1,6 @@
 {
   "version": "v2",
-  "saved_at_utc": "2026-09-28T06:35:22.031610+00:00",
+  "saved_at_utc": "2026-09-28T20:03:51.751459+00:00",
   "model_type": "TemporalFusionTransformer",
   "framework": "pytorch-forecasting",
   "features": [
@@ -32,7 +32,7 @@
   "max_epochs": 5,
   "train_rows": 37315,
   "validation_rows": 9388,
-  "best_epoch": 4,
-  "best_val_loss": 4.050516128540039,
-  "source_checkpoint": "C:\\Users\\307124\\Documents\\BOU\\PIC\\backend\\models\\tft\\_checkpoints\\best-epoch=04-val_loss=4.0505.ckpt"
+  "best_epoch": 3,
+  "best_val_loss": 4.228615760803223,
+  "source_checkpoint": "C:\\Users\\manas\\Downloads\\PIC\\backend\\models\\tft\\_checkpoints\\best-epoch=03-val_loss=4.2286.ckpt"
 }
