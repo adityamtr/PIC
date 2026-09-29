@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import data_v2, planner
+from . import data_v2, forecast, planner
 from .schemas import DecisionRequest, DecisionResponse, IntentRequest
 
 app = FastAPI(
@@ -45,6 +45,19 @@ def _ds(fund_id):
 @app.get("/api/health")
 def health():
     return {"status": "ok", "service": "pic-trade-plan-api", "version": app.version}
+
+
+@app.get("/api/model")
+def get_model_info():
+    """Return current active model version, available versions, and model metadata."""
+    return forecast.get_active_model_info()
+
+
+@app.post("/api/model/switch")
+def switch_model_version(version: str = Query(..., description="Target model version (e.g. 'v1', 'v2', 'latest')")):
+    """Switch active model version across the application in one go."""
+    new_version = forecast.set_active_model_version(version)
+    return {"status": "success", "switched_to": new_version, "model": forecast.get_active_model_info()}
 
 
 @app.get("/api/funds")
