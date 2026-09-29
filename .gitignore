@@ -62,6 +62,7 @@ pnpm-debug.log*
 *.h5
 *.pkl
 /models/
+/backend/models/
 lightning_logs/
 
 # ---------- Misc ----------
@@ -71,3 +72,6 @@ lightning_logs/
 misc/
 
 data/raw/mf.parquet
+data/processed/final/stock_macro_monthly_model.csv
+**/.ipynb_checkpoints/
+NUL
