@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import data_v2, forecast, planner
+from . import data_v2, db, forecast, planner
 from .schemas import DecisionRequest, DecisionResponse, IntentRequest
 
 app = FastAPI(
@@ -182,16 +182,22 @@ def get_universe():
 # --------------------------------------------------------------------------- #
 # Trade-plan generation & PIC review
 # --------------------------------------------------------------------------- #
+def _load_plan(plan_id: str) -> dict | None:
+    """Fetch a plan from the DB, falling back to the in-memory cache."""
+    return db.get_plan(plan_id) or _PLANS.get(plan_id)
+
+
 @app.post("/api/trade-plan")
 def create_trade_plan(req: IntentRequest, fund_id: str | None = Query(None)):
     plan = planner.generate_plan(fund_id or req.fund_id, req.model_dump(exclude={"fund_id"}))
-    _PLANS[plan["plan_id"]] = plan
+    _PLANS[plan["plan_id"]] = plan   # in-memory cache (fallback when DB is absent)
+    db.save_plan(plan)               # persist to SQLite (no-op if DB unavailable)
     return plan
 
 
 @app.get("/api/trade-plan/{plan_id}")
 def get_trade_plan(plan_id: str):
-    plan = _PLANS.get(plan_id)
+    plan = _load_plan(plan_id)
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
     return plan
@@ -199,7 +205,7 @@ def get_trade_plan(plan_id: str):
 
 @app.post("/api/trade-plan/{plan_id}/decision", response_model=DecisionResponse)
 def decide_trade_plan(plan_id: str, req: DecisionRequest):
-    plan = _PLANS.get(plan_id)
+    plan = _load_plan(plan_id)
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
     status_map = {
@@ -208,8 +214,12 @@ def decide_trade_plan(plan_id: str, req: DecisionRequest):
     }
     new_status = status_map[req.decision]
     decided_at = datetime.now(timezone.utc).isoformat()
+    decision = {"decision": req.decision, "reviewer": req.reviewer,
+                "comment": req.comment, "decided_at": decided_at}
     plan["status"] = new_status
-    plan["decision"] = {"decision": req.decision, "reviewer": req.reviewer,
-                        "comment": req.comment, "decided_at": decided_at}
+    plan["decision"] = decision
+    if plan_id in _PLANS:
+        _PLANS[plan_id] = plan
+    db.save_decision(plan_id, new_status, decision)   # persist (no-op if DB absent)
     return DecisionResponse(plan_id=plan_id, status=new_status, decision=req.decision,
                             reviewer=req.reviewer, comment=req.comment, decided_at=decided_at)
