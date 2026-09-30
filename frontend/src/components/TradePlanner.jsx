@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
 import {
-  Alert, Box, Button, Checkbox, Chip, CircularProgress, Divider, Grow,
+  Accordion, AccordionDetails, AccordionSummary, Alert, Box, Button, Checkbox, Chip, CircularProgress, Divider, Grow,
   FormControl, InputLabel, ListItemText, MenuItem, Select, Stack, Step, StepLabel,
   Stepper, Table, TableBody, TableCell, TableHead, TableRow, TextField,
   ToggleButton, ToggleButtonGroup,
   Typography,
 } from '@mui/material'
 import CheckCircleIcon from '@mui/icons-material/CheckCircle'
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import EditIcon from '@mui/icons-material/EditOutlined'
 import CloseIcon from '@mui/icons-material/CloseOutlined'
 import NorthEastIcon from '@mui/icons-material/NorthEast'
@@ -16,6 +17,35 @@ import { KpiGrid, Panel, ScrollX, Stat } from './ui'
 
 const toCr = (r) => r / 1e7
 const STEPS = ['PM Intent', 'Cash-Flow Planning', 'Trade Plan', 'Compliance & Risk', 'PIC Review']
+const MAX_SETTLEMENT_DAYS = 33
+const dateString = (date) => {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+const dateOffset = (days) => {
+  const date = new Date()
+  date.setDate(date.getDate() + days)
+  return dateString(date)
+}
+const dateOffsetFrom = (value, days) => {
+  if (!value) return undefined
+  const date = new Date(`${value}T00:00:00`)
+  date.setDate(date.getDate() + days)
+  return dateString(date)
+}
+const dateMonthOffset = (months) => {
+  const date = new Date()
+  const day = date.getDate()
+  date.setDate(1)
+  date.setMonth(date.getMonth() + months)
+  date.setDate(Math.min(day, new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate()))
+  return dateString(date)
+}
+const daysBetween = (start, end) => Math.round(
+  (Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86400000,
+)
 
 const ACTIONS = [
   { key: 'contribution', label: 'Contribution', needsAmount: true, needsTarget: false, hint: 'Deploy an inflow across the book toward target weights.' },
@@ -43,18 +73,131 @@ const sevOf = (s) => (s === 'FAIL' || s === 'BREACH' || s === 'HIGH' ? 'error'
   : s === 'WARN' || s === 'MEDIUM' ? 'warning' : 'success')
 
 const fmtRet = (r) => (r == null ? '—' : `${(r * 100).toFixed(2)}%`)
+const formatShortDate = (value) => {
+  if (!value) return '—'
+  const [year, month, day] = value.split('-')
+  return `${day}/${month}/${year.slice(-2)}`
+}
+const RISK_LABELS = {
+  country: 'Portfolio exposure',
+  liquidity: 'Execution liquidity',
+  timing: 'Market timing',
+  lock_in: 'Lock-in constraints',
+  plan_creation: 'Plan validation',
+}
+const riskToneSx = (severity) => (theme) => {
+  const dark = theme.palette.mode === 'dark'
+  const tones = {
+    HIGH: dark
+      ? { color: '#F0B6B6', bgcolor: 'rgba(191, 68, 68, 0.14)', borderColor: 'rgba(240, 182, 182, 0.35)' }
+      : { color: '#873C3C', bgcolor: '#F8EEEE', borderColor: '#E8C9C9' },
+    MEDIUM: dark
+      ? { color: '#E6CA86', bgcolor: 'rgba(194, 152, 65, 0.14)', borderColor: 'rgba(230, 202, 134, 0.32)' }
+      : { color: '#755A24', bgcolor: '#F8F4E9', borderColor: '#E7D8B2' },
+  }
+  return tones[severity] || (dark
+    ? { color: '#B9C6D2', bgcolor: 'rgba(125, 145, 165, 0.14)', borderColor: 'rgba(185, 198, 210, 0.28)' }
+    : { color: '#526575', bgcolor: '#F0F4F7', borderColor: '#D7E0E8' })
+}
+
+function RiskRegister({ flags }) {
+  if (!flags.length) {
+    return <Typography color="text.secondary" variant="body2">No material execution risks.</Typography>
+  }
+
+  const grouped = flags.reduce((groups, flag) => {
+    const category = flag.type || 'other'
+    groups[category] = [...(groups[category] || []), flag]
+    return groups
+  }, {})
+  const groups = Object.entries(grouped).sort(([a], [b]) => a.localeCompare(b))
+
+  return (
+    <Box sx={{ maxHeight: 360, overflowY: 'auto' }}>
+      {groups.map(([category, items]) => {
+        const highCount = items.filter((item) => item.severity === 'HIGH').length
+        const reviewCount = items.filter((item) => item.severity === 'MEDIUM').length
+        return (
+          <Accordion key={category} disableGutters elevation={0} defaultExpanded={items.length <= 3}
+            sx={{
+              bgcolor: 'transparent',
+              borderBottom: 1,
+              borderColor: 'divider',
+              '&:before': { display: 'none' },
+            }}>
+            <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={{ px: 0, minHeight: 48,
+              '& .MuiAccordionSummary-content': { my: 1 } }}>
+              <Stack direction="row" alignItems="center" spacing={1} sx={{ flexWrap: 'wrap', pr: 1 }}>
+                <Typography variant="body2" fontWeight={700}>
+                  {RISK_LABELS[category] || category.replaceAll('_', ' ')}
+                </Typography>
+                <Chip size="small" variant="outlined" label={`${items.length} ${items.length === 1 ? 'risk' : 'risks'}`} />
+                {highCount > 0 && <Chip size="small" variant="outlined" sx={riskToneSx('HIGH')} label={`${highCount} high`} />}
+                {reviewCount > 0 && <Chip size="small" variant="outlined" sx={riskToneSx('MEDIUM')} label={`${reviewCount} review`} />}
+              </Stack>
+            </AccordionSummary>
+            <AccordionDetails sx={{ px: 0, pt: 0, pb: 1.5 }}>
+              <Stack divider={<Divider flexItem />}>
+                {items.map((flag, index) => (
+                  <Stack key={`${category}-${flag.ticker || 'scope'}-${index}`}
+                    direction={{ xs: 'column', sm: 'row' }} spacing={0.75}
+                    alignItems={{ sm: 'center' }} justifyContent="space-between"
+                    sx={{ py: 1, gap: 1 }}>
+                    <Box sx={{ minWidth: { sm: 130 }, flexShrink: 0 }}>
+                      <Typography variant="body2" fontWeight={700}>
+                        {flag.ticker || flag.entity || 'Portfolio'}
+                      </Typography>
+                    </Box>
+                    <Typography variant="body2" color="text.secondary" sx={{ flex: 1, minWidth: 0 }}>
+                      {flag.message}
+                    </Typography>
+                    <Chip size="small" label={flag.severity} variant="outlined" sx={riskToneSx(flag.severity)} />
+                  </Stack>
+                ))}
+              </Stack>
+            </AccordionDetails>
+          </Accordion>
+        )
+      })}
+    </Box>
+  )
+}
+
+function AdditionalPlanNotes({ warnings, riskFlags }) {
+  const representedFindings = new Set(riskFlags.map((flag) => flag.message))
+  const notes = warnings.filter((warning) => {
+    const separator = warning.indexOf(': ')
+    const message = separator >= 0 ? warning.slice(separator + 2) : warning
+    return !representedFindings.has(message)
+  })
+
+  if (!notes.length) return null
+  return (
+    <Box sx={{ borderLeft: 3, borderColor: 'warning.main', pl: 1.5 }}>
+      <Typography variant="caption" color="text.secondary" fontWeight={700}>
+        Additional plan notes
+      </Typography>
+      <Stack spacing={0.5} sx={{ mt: 0.5 }}>
+        {notes.map((note, index) => <Typography key={index} variant="body2">{note}</Typography>)}
+      </Stack>
+    </Box>
+  )
+}
 
 function OrdersTable({ orders }) {
   if (!orders.length) return <Typography color="text.secondary">No orders generated.</Typography>
+  const hasTax = orders.some((o) => o.tax)
   return (
     <ScrollX>
       <Table size="small" stickyHeader>
         <TableHead>
           <TableRow>
             <TableCell>Security</TableCell><TableCell>Side</TableCell>
+            <TableCell sx={{ whiteSpace: 'nowrap' }}>Trade Date</TableCell>
             <TableCell align="right">Shares</TableCell><TableCell align="right">Price</TableCell>
-            <TableCell align="right">Est. Value</TableCell>
+            <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>Est. Value</TableCell>
             <TableCell align="right">Pred. 1-M Return</TableCell>
+            {hasTax && <TableCell align="right">Est. Tax</TableCell>}
           </TableRow>
         </TableHead>
         <TableBody>
@@ -68,12 +211,27 @@ function OrdersTable({ orders }) {
                 <Chip size="small" label={o.side}
                   color={o.side === 'BUY' ? 'success' : 'error'} variant="outlined" />
               </TableCell>
+              <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatShortDate(o.trade_date)}</TableCell>
               <TableCell align="right">{fmtNum(o.shares)}</TableCell>
               <TableCell align="right">{fmtRupee(o.price, 0)}</TableCell>
-              <TableCell align="right">{fmtCrValue(toCr(o.est_value))}</TableCell>
+              <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>{fmtCrValue(toCr(o.est_value))}</TableCell>
               <TableCell align="right" sx={{ color: o.expected_return >= 0 ? 'success.main' : 'error.main', fontWeight: 600 }}>
                 {fmtRet(o.expected_return)}
               </TableCell>
+              {hasTax && (
+                <TableCell align="right">
+                  {o.tax ? (
+                    <Stack direction="row" spacing={0.5} justifyContent="flex-end" alignItems="center">
+                      <Typography variant="body2"
+                        sx={{ color: o.tax.total_tax < 0 ? 'success.main' : 'text.primary', fontWeight: 600 }}>
+                        {fmtRupee(o.tax.total_tax, 0)}
+                      </Typography>
+                      {o.tax.stcg_gain !== 0 && <Chip size="small" variant="outlined" color="warning" label="STCG" />}
+                      {o.tax.ltcg_gain !== 0 && <Chip size="small" variant="outlined" color="info" label="LTCG" />}
+                    </Stack>
+                  ) : '—'}
+                </TableCell>
+              )}
             </TableRow>
           ))}
         </TableBody>
@@ -128,23 +286,36 @@ export default function TradePlanner({ fundId }) {
   const [targets, setTargets] = useState(['Information Technology'])
   const [manualSelections, setManualSelections] = useState([])
   const [manualSectorSelections, setManualSectorSelections] = useState([])
-  const [horizon, setHorizon] = useState(5)
+  const [tradeDate, setTradeDate] = useState(() => dateOffset(0))
+  const [settlementDate, setSettlementDate] = useState(() => dateOffset(2))
   const [method, setMethod] = useState('optimize')
   const [plan, setPlan] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
+  const [validationWarning, setValidationWarning] = useState('')
   const [decision, setDecision] = useState(null)
   const [fundSectors, setFundSectors] = useState([])
   const [universe, setUniverse] = useState([])
   const [holdings, setHoldings] = useState([])
+  const today = dateOffset(0)
+  const latestTradeDate = dateMonthOffset(1)
   const securityOptions = [...universe, ...holdings.filter((h) => !universe.some((u) => u.ticker === h.ticker))]
 
   const cfg = ACTIONS.find((a) => a.key === action)
   const manualUsesSectors = method === 'manual' && cfg.needsTarget
+  const hasExplicitManualAmounts = method === 'manual' && (
+    manualUsesSectors ? manualSectorSelections.length > 0 : manualSelections.length > 0
+  )
+  const needsTopLevelAmount = cfg.needsAmount && (
+    action === 'contribution' || !hasExplicitManualAmounts
+  )
   // Increase can target any buyable sector; Reduce only sectors the fund holds.
   const sectorOptions = action === 'increase'
     ? BUYABLE_SECTORS
     : (fundSectors.length ? fundSectors : BUYABLE_SECTORS)
+  const visibleManualSectorSelections = manualSectorSelections.filter(
+    (selection) => targets.includes(selection.sector) && sectorOptions.includes(selection.sector),
+  )
 
   // On fund change: clear any plan and load the fund's sectors for the dropdown.
   useEffect(() => {
@@ -177,15 +348,32 @@ export default function TradePlanner({ fundId }) {
   }
 
   async function generate() {
+    const horizon = daysBetween(tradeDate, settlementDate)
+    if (horizon < 1 || horizon > MAX_SETTLEMENT_DAYS) {
+      setValidationWarning(`Settlement date must be 1 to ${MAX_SETTLEMENT_DAYS} days after the trade date.`)
+      setError(null)
+      return
+    }
+    const manualAmounts = manualUsesSectors ? manualSectorSelections : manualSelections
+    const hasNegativeManualAmount = method === 'manual'
+      && manualAmounts.some((selection) => Number(selection.amount_cr) < 0)
+    if ((needsTopLevelAmount && Number(amount) < 0) || hasNegativeManualAmount) {
+      setValidationWarning('Amounts must be zero or greater. Correct the highlighted amount(s) before generating the plan.')
+      setError(null)
+      return
+    }
+    setValidationWarning('')
     setBusy(true); setError(null); setDecision(null); setPlan(null)
     try {
       const payload = {
         action,
-        amount_cr: cfg.needsAmount ? Number(amount) : undefined,
+        amount_cr: needsTopLevelAmount ? Number(amount) : undefined,
         targets: cfg.needsTarget ? targets : undefined,
         manual_selections: method === 'manual' && !manualUsesSectors ? manualSelections : undefined,
         manual_sector_selections: method === 'manual' && manualUsesSectors ? manualSectorSelections : undefined,
-        horizon_days: Number(horizon),
+        trade_date: tradeDate,
+        settlement_date: settlementDate,
+        horizon_days: horizon,
         method,
         fund_id: fundId,
       }
@@ -271,8 +459,14 @@ export default function TradePlanner({ fundId }) {
                   <Typography variant="body2" fontWeight={600}>{selection.ticker}</Typography>
                   <Stack direction="row" spacing={1} alignItems="center">
                     <TextField size="small" type="number" label="₹ Cr" value={selection.amount_cr}
-                      onChange={(e) => setManualSelections((current) => current.map((item) =>
-                        item.ticker === selection.ticker ? { ...item, amount_cr: e.target.value } : item))}
+                      error={Number(selection.amount_cr) < 0}
+                      helperText={Number(selection.amount_cr) < 0 ? 'Cannot be negative' : ' '}
+                      inputProps={{ min: 0 }}
+                      onChange={(e) => {
+                        setValidationWarning('')
+                        setManualSelections((current) => current.map((item) =>
+                          item.ticker === selection.ticker ? { ...item, amount_cr: e.target.value } : item))
+                      }}
                       sx={{ width: 105 }} />
                     <ToggleButtonGroup exclusive size="small" value={selection.side}
                       onChange={(_, side) => side && setManualSelections((current) => current.map((item) =>
@@ -285,49 +479,81 @@ export default function TradePlanner({ fundId }) {
               ))}
             </Stack>
           ) : cfg.needsTarget && (
-            <FormControl size="small" sx={{ width: { xs: '100%', sm: 300 }, flexShrink: 0 }}>
-              <InputLabel id="sector-targets-label">Sectors</InputLabel>
-              <Select labelId="sector-targets-label" label="Sectors" multiple
-              value={targets.filter((t) => sectorOptions.includes(t))}
-              onChange={(e) => {
-                const selected = e.target.value
-                setTargets(selected)
-                setManualSectorSelections(selected.map((sector) => ({
-                  sector,
-                  amount_cr: manualSectorSelections.find((item) => item.sector === sector)?.amount_cr || 0,
-                })))
-              }}
-              sx={{ width: '100%',
-                '& .MuiSelect-select': { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }}
-              renderValue={(selected) => selected.join(', ')}
-              MenuProps={{ disableAutoFocusItem: true }}>
-              {sectorOptions.map((sector) => (
-                <MenuItem key={sector} value={sector}>
-                  <Checkbox size="small" checked={targets.indexOf(sector) > -1} />
-                  <ListItemText primary={sector} />
-                </MenuItem>
-              ))}
-              </Select>
-              <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
-                Enter a separate amount for each selected sector.
-              </Typography>
-              {manualSectorSelections.map((selection) => (
-                <TextField key={selection.sector} size="small" type="number" label={`${selection.sector} (₹ Cr)`}
-                  value={selection.amount_cr}
-                  onChange={(e) => setManualSectorSelections((current) => current.map((item) =>
-                    item.sector === selection.sector ? { ...item, amount_cr: e.target.value } : item))}
-                  sx={{ width: '100%' }} />
-              ))}
-            </FormControl>
+            <Stack spacing={1.25} sx={{ width: { xs: '100%', sm: 520 }, maxWidth: '100%', minWidth: 0, flexShrink: 0 }}>
+              <FormControl size="small" sx={{ width: '100%', minWidth: 0 }}>
+                <InputLabel id="sector-targets-label">Sectors</InputLabel>
+                <Select labelId="sector-targets-label" label="Sectors" multiple
+                  value={targets.filter((t) => sectorOptions.includes(t))}
+                  onChange={(e) => {
+                    const selected = e.target.value
+                    setTargets(selected)
+                    setManualSectorSelections(selected.map((sector) => ({
+                      sector,
+                      amount_cr: manualSectorSelections.find((item) => item.sector === sector)?.amount_cr || 0,
+                    })))
+                  }}
+                  sx={{ width: '100%', minWidth: 0,
+                    '& .MuiSelect-select': { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }}
+                  renderValue={(selected) => selected.join(', ')}
+                  MenuProps={{ disableAutoFocusItem: true }}>
+                  {sectorOptions.map((sector) => (
+                    <MenuItem key={sector} value={sector}>
+                      <Checkbox size="small" checked={targets.indexOf(sector) > -1} />
+                      <ListItemText primary={sector} />
+                    </MenuItem>
+                  ))}
+                </Select>
+                <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
+                  Enter a separate amount for each selected sector.
+                </Typography>
+              </FormControl>
+              {manualUsesSectors && visibleManualSectorSelections.length > 0 && (
+                <Box sx={{ display: 'grid', gridTemplateColumns: { xs: 'minmax(0, 1fr)', sm: 'repeat(2, minmax(0, 1fr))' }, gap: 1.25 }}>
+                  {visibleManualSectorSelections.map((selection) => (
+                    <Box key={selection.sector} sx={{ minWidth: 0 }}>
+                      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
+                        {selection.sector}
+                      </Typography>
+                      <TextField size="small" type="number" label="Amount (₹ Cr)" value={selection.amount_cr}
+                        error={Number(selection.amount_cr) < 0}
+                        helperText={Number(selection.amount_cr) < 0 ? 'Cannot be negative' : ' '}
+                        inputProps={{ min: 0 }}
+                        onChange={(e) => {
+                          setValidationWarning('')
+                          setManualSectorSelections((current) => current.map((item) =>
+                            item.sector === selection.sector ? { ...item, amount_cr: e.target.value } : item))
+                        }}
+                        sx={{ width: '100%' }} />
+                    </Box>
+                  ))}
+                </Box>
+              )}
+            </Stack>
           )}
-          {cfg.needsAmount && method !== 'manual' && (
+          {needsTopLevelAmount && (
             <TextField label="Amount (₹ Cr)" size="small" type="number" value={amount}
-              onChange={(e) => setAmount(e.target.value)} sx={{ width: { xs: '100%', sm: 150 }, flexShrink: 0 }} />
+              error={Number(amount) < 0}
+              helperText={Number(amount) < 0 ? 'Cannot be negative' : ' '}
+              inputProps={{ min: 0 }}
+              onChange={(e) => {
+                setValidationWarning('')
+                setAmount(e.target.value)
+              }}
+              sx={{ width: { xs: '100%', sm: 150 }, flexShrink: 0 }} />
           )}
-          <TextField label="Horizon" size="small" select value={horizon}
-            onChange={(e) => setHorizon(e.target.value)} sx={{ width: { xs: '100%', sm: 130 }, flexShrink: 0 }}>
-            {[3, 5, 10, 15].map((d) => <MenuItem key={d} value={d}>{d} business days</MenuItem>)}
-          </TextField>
+          <TextField label="Trade date" type="date" size="small" value={tradeDate}
+            slotProps={{ htmlInput: { min: today, max: latestTradeDate } }}
+            onChange={(e) => { setTradeDate(e.target.value); setPlan(null); setDecision(null) }}
+            InputLabelProps={{ shrink: true }}
+            sx={{ width: { xs: '100%', sm: 170 }, flexShrink: 0 }} />
+          <TextField label="Settlement date" type="date" size="small" value={settlementDate}
+            slotProps={{ htmlInput: {
+              min: tradeDate,
+              max: dateOffsetFrom(tradeDate, MAX_SETTLEMENT_DAYS),
+            } }}
+            onChange={(e) => { setSettlementDate(e.target.value); setPlan(null); setDecision(null) }}
+            InputLabelProps={{ shrink: true }}
+            sx={{ width: { xs: '100%', sm: 190 }, flexShrink: 0 }} />
           <Button variant="contained" size="large" onClick={generate} disabled={busy}
             sx={{ width: 170, minWidth: 170, height: 40, flexShrink: 0 }}
             startIcon={busy ? <CircularProgress size={16} color="inherit" /> : null}>
@@ -344,6 +570,7 @@ export default function TradePlanner({ fundId }) {
         </Stack>
       </Panel>
 
+      {validationWarning && <Alert severity="warning">{validationWarning}</Alert>}
       {error && <Alert severity="error">{error} — is the backend running on :8000?</Alert>}
 
       {plan && (
@@ -352,7 +579,7 @@ export default function TradePlanner({ fundId }) {
             {/* Summary tiles — investable cash leads with an accent */}
             <KpiGrid min={190}>
               <Stat accent label="Investable Cash" value={fmtCrValue(toCr(s.investable_amount), 0)}
-                sub={`over ${plan.intent.horizon_days} business days`} color="secondary.main" />
+                sub={`${plan.intent.trade_date} to ${plan.intent.settlement_date}`} color="secondary.main" />
               <Stat label="Buy / Sell" value={`${fmtCrValue(toCr(s.total_buy_value), 0)}`}
                 sub={`sell ${fmtCrValue(toCr(s.total_sell_value), 0)} · ${s.order_count} orders`} />
               <Stat label="Net Cash Impact" value={fmtCrValue(toCr(s.net_cash_impact), 0)}
@@ -360,6 +587,11 @@ export default function TradePlanner({ fundId }) {
                 color={s.net_cash_impact < 0 ? 'error.main' : 'success.main'} />
               <Stat label="Compliance" value={<Chip label={s.compliance_status} color={sevOf(s.compliance_status)} size="small" />}
                 sub={decision ? decision.status : plan.status} />
+              {s.total_sell_value > 0 && (
+                <Stat label="Est. Exit Tax" value={fmtCrValue(toCr(s.est_total_tax), 2)}
+                  sub={`${s.tax_drag_bps} bps drag · ${s.stcg_share_pct}% STCG`}
+                  color={s.est_total_tax < 0 ? 'success.main' : s.tax_drag_bps > 60 ? 'error.main' : 'text.primary'} />
+              )}
             </KpiGrid>
 
             <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1 }}>
@@ -379,9 +611,13 @@ export default function TradePlanner({ fundId }) {
                 {opt.deployed_return_pct != null && <> · deployed-capital return {opt.deployed_return_pct}%</>}
                 {opt.given_up_return_cr != null && <> · return given up {fmtCrValue(opt.given_up_return_cr)} to raise {fmtCrValue(opt.amount_raised_cr)}</>}
                 {opt.expected_return_post_pct != null && <> · book return {opt.expected_return_pre_pct}% → {opt.expected_return_post_pct}% (turnover ≤ {opt.turnover_budget_pct}%)</>}
+                {opt.est_tax_cr != null && <> · est. tax {fmtCrValue(opt.est_tax_cr)}</>}
+                {opt.tax_saved_vs_naive_cr != null && opt.tax_saved_vs_naive_cr > 0 && (
+                  <> · <strong>tax-aware saved {fmtCrValue(opt.tax_saved_vs_naive_cr)} vs a tax-blind plan</strong></>
+                )}
               </Alert>
             )}
-            {plan.warnings?.map((w, i) => <Alert key={i} severity="warning">{w}</Alert>)}
+            <AdditionalPlanNotes warnings={plan.warnings || []} riskFlags={plan.risk_flags || []} />
 
             {/* Bento: the generated orders are the hero (wide, highlighted);
                 cash-flow + pending context ride a side rail. */}
@@ -478,15 +714,7 @@ export default function TradePlanner({ fundId }) {
                 </Box>
                 <Box>
                   <Typography variant="subtitle2" gutterBottom>Execution Risk</Typography>
-                  {plan.risk_flags.length === 0 ? <Typography color="text.secondary" variant="body2">No material execution risks.</Typography> : (
-                    <Stack spacing={1}>
-                      {plan.risk_flags.map((r, i) => (
-                        <Alert key={i} severity={sevOf(r.severity)} variant="outlined" sx={{ py: 0 }}>
-                          <strong>{r.type}</strong> — {r.message}
-                        </Alert>
-                      ))}
-                    </Stack>
-                  )}
+                  <RiskRegister flags={plan.risk_flags || []} />
                 </Box>
               </Box>
             </Panel>

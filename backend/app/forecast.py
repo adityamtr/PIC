@@ -1,7 +1,7 @@
 """
 Return-forecasting layer — powered by versioned TemporalFusionTransformer (TFT) backend models.
 
-Consumes predictions produced by TFT models stored under `backend/models/tft/{version}/`.
+Consumes versioned predictions stored under `backend/predictions/{version}/`.
 Model versions can be switched dynamically or via environment variables (`TFT_MODEL_VERSION` or `MODEL_VERSION`).
 """
 
@@ -16,6 +16,7 @@ from . import data
 
 # Root directory for backend TFT models
 MODELS_DIR = Path(__file__).resolve().parent.parent / "models" / "tft"
+PREDICTIONS_DIR = Path(__file__).resolve().parent.parent / "predictions"
 
 # In-memory model cache
 _CURRENT_VERSION: str | None = None
@@ -25,15 +26,16 @@ _DEFAULT_RETURN = 0.010
 
 
 def list_available_versions() -> list[str]:
-    """Find all valid version subdirectories under backend/models/tft (e.g., ['v1', 'v2'])."""
-    if not MODELS_DIR.exists():
-        return []
-    version_dirs = []
-    for p in MODELS_DIR.glob("v*"):
-        if p.is_dir() and p.name[1:].isdigit():
-            version_dirs.append(p.name)
-    version_dirs.sort(key=lambda name: int(name[1:]))
-    return version_dirs
+    """List model versions that have predictions under backend/predictions."""
+    versions = {
+        path.name
+        for path in PREDICTIONS_DIR.glob("v*")
+        if path.is_dir() and path.name[1:].isdigit()
+        and (path / "predictions.json").is_file()
+    }
+    if (PREDICTIONS_DIR / "predictions.json").is_file():
+        versions.add("v2")
+    return sorted(versions, key=lambda name: int(name[1:]))
 
 
 def resolve_model_version(requested_version: str | None = None) -> str:
@@ -87,7 +89,9 @@ def load_model(version: str | None = None) -> str:
         except Exception:
             pass
 
-    pred_file = version_dir / "predictions.json"
+    pred_file = PREDICTIONS_DIR / target_version / "predictions.json"
+    if target_version == "v2" and not pred_file.exists():
+        pred_file = PREDICTIONS_DIR / "predictions.json"
     if pred_file.exists():
         try:
             with open(pred_file, "r", encoding="utf-8") as f:

@@ -1,0 +1,12 @@
+{
+  "financial_year": "2025-26",
+  "description": "Indian equity taxation parameters used by the tax-aware planner. Rates are real statutory values; see docs/taxation-model.md for the fund-level Section 10(23D) caveat.",
+  "stcg_rate_pct": 20.0,
+  "ltcg_rate_pct": 12.5,
+  "ltcg_exemption_inr": 125000,
+  "ltcg_holding_months": 12,
+  "stt_sell_pct": 0.10,
+  "stamp_duty_buy_pct": 0.015,
+  "brokerage_pct": 0.03,
+  "exchange_charges_pct": 0.00345
+}

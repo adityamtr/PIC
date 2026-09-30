@@ -12,7 +12,7 @@ from collections import defaultdict
 from . import data, data_v2
 
 CRORE = data.CRORE
-POLICY_VERSION = "dummy-policy-2026-09"
+POLICY_VERSION = "dummy-policy-2026-09-tax1"
 
 POLICY_DEFAULTS = {
     "warning_ratio": 0.90,
@@ -38,6 +38,10 @@ POLICY_DEFAULTS = {
     "foreign_currency_block_pct": 15.0,
     "event_warn_days": 2,
     "dividend_warn_days": 1,
+    # Tax-awareness thresholds (synthetic CGT layer + real STT/charges).
+    "tax_drag_warn_bps": 60.0,
+    "tax_drag_escalate_bps": 150.0,
+    "tax_stcg_share_warn_pct": 50.0,
 }
 
 # Dummy POC exclusion. Existing positions may remain, but new purchases are
@@ -421,11 +425,56 @@ def _order_checks(ds: dict, orders: list[dict], cash_flow: dict, horizon_days: i
     return checks
 
 
-def evaluate(ds: dict, orders: list[dict], cash_flow: dict, horizon_days: int) -> dict:
+def _tax_checks(ds: dict, orders: list[dict], tax_context: dict) -> list[dict]:
+    """Tax-awareness guardrails (WARN/ESCALATE only - the human decides)."""
+    checks = []
+    sell_value = tax_context.get("sell_value", 0.0)
+    if sell_value > 0:
+        drag = tax_context.get("tax_drag_bps", 0.0)
+        if drag > POLICY_DEFAULTS["tax_drag_escalate_bps"]:
+            drag_status = "ESCALATE"
+        elif drag > POLICY_DEFAULTS["tax_drag_warn_bps"]:
+            drag_status = "WARN"
+        else:
+            drag_status = "PASS"
+        checks.append(_check(
+            "TAX-DRAG", "taxation", drag_status, "plan",
+            f"Estimated exit tax is {tax_context.get('est_total_tax', 0.0) / CRORE:.2f} Cr "
+            f"({drag:.1f} bps of sell proceeds).",
+            POLICY_DEFAULTS["tax_drag_warn_bps"], drag,
+        ))
+
+        stcg_share = tax_context.get("stcg_share_pct", 0.0)
+        stcg_status = "WARN" if stcg_share > POLICY_DEFAULTS["tax_stcg_share_warn_pct"] else "PASS"
+        checks.append(_check(
+            "TAX-STCG-SHARE", "taxation", stcg_status, "plan",
+            f"{stcg_share:.1f}% of sell value comes from short-term (STCG 20%) lots"
+            + ("; consider deferring lots close to turning long-term (LTCG 12.5%)."
+               if stcg_status == "WARN" else "."),
+            POLICY_DEFAULTS["tax_stcg_share_warn_pct"], stcg_share,
+        ))
+
+    for item in tax_context.get("held_due_to_tax", []):
+        maturity = (f" STCG lots turn LTCG on {item['ltcg_maturity']}."
+                    if item.get("ltcg_maturity") else "")
+        checks.append(_check(
+            "TAX-HOLD", "taxation", "WARN", item["ticker"],
+            f"{item['ticker']} has a negative forecast return ({item['expected_return_pct']}%) "
+            f"but was kept because its exit cost ({item['exit_cost_pct']}%) exceeds the "
+            f"expected loss over the horizon.{maturity}",
+            None, item["exit_cost_pct"],
+        ))
+    return checks
+
+
+def evaluate(ds: dict, orders: list[dict], cash_flow: dict, horizon_days: int,
+             tax_context: dict | None = None) -> dict:
     """Evaluate the proposed order set against the dummy policy controls."""
     limits = _limits(ds)
     checks = _concentration_checks(ds, orders, limits)
     checks.extend(_order_checks(ds, orders, cash_flow, horizon_days))
+    if tax_context:
+        checks.extend(_tax_checks(ds, orders, tax_context))
     counts = {status: sum(1 for check in checks if check["status"] == status)
               for status in ("PASS", "WARN", "BLOCK", "ESCALATE")}
     blocking = [check for check in checks if check["status"] == "BLOCK"]
