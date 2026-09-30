@@ -15,7 +15,7 @@ import csv
 from datetime import date, timedelta
 from pathlib import Path
 
-from . import xlsx_parser
+from . import db, xlsx_parser
 from .security_metadata import curate_security_metadata
 from .tax_lots import attach_tax_data
 
@@ -187,13 +187,11 @@ def _load_prices() -> dict:
     return price_dict
 
 
-# Load once at module init
-_HDFC_HOLDINGS = _load_hdfc_holdings()
-_ICICI_HOLDINGS = _load_icici_holdings()
-_SBI_HOLDINGS = _load_sbi_holdings()
-_HDFC_RETIREMENT_HOLDINGS = _load_hdfc_retirement_holdings()
-_KOTAK_HOLDINGS = _load_kotak_holdings()
-_PRICES_DICT = _load_prices()
+# Prices are loaded lazily, only during a build-from-source (used to seed the
+# database). The serving app reads fully-built datasets from the DB instead, so
+# it never touches the XLSX/CSV feeds — see build_datasets_from_source() and the
+# FUNDS_V2 assignment below.
+_PRICES_DICT: dict = {}
 
 
 # --------------------------------------------------------------------------- #
@@ -214,7 +212,7 @@ FUND_SPECS_V2 = {
             "expense_ratio": 0.72,
             "risk_grade": "Very High",
         },
-        "holdings_list": _HDFC_HOLDINGS,
+        "holdings_loader": _load_hdfc_holdings,
         "pending": [
             ("PT-10231", "INFY",      "BUY",  40_000,  2072, 0, 1, "Unsettled"),
             ("PT-10232", "HDFCBANK", "SELL", 300_000, 1617, 0, 1, "Unsettled"),
@@ -251,7 +249,7 @@ FUND_SPECS_V2 = {
             "expense_ratio": 0.68,
             "risk_grade": "Very High",
         },
-        "holdings_list": _ICICI_HOLDINGS,
+        "holdings_loader": _load_icici_holdings,
         "pending": [
             ("PT-22101", "HDFCBANK", "BUY",  90_000,  1617, 0, 1, "Unsettled"),
             ("PT-22102", "RELIANCE", "SELL", 400_000, 3097, 0, 1, "Unsettled"),
@@ -285,7 +283,7 @@ FUND_SPECS_V2 = {
             "expense_ratio": 0.18,
             "risk_grade": "High",
         },
-        "holdings_list": _SBI_HOLDINGS,
+        "holdings_loader": _load_sbi_holdings,
         "pending": [
             ("PT-30101", "RELIANCE", "BUY",  50_000,  3097, 0, 1, "Unsettled"),
             ("PT-30102", "TCS",      "BUY",  30_000,  4150, 0, 1, "Unsettled"),
@@ -320,7 +318,7 @@ FUND_SPECS_V2 = {
             "expense_ratio": 0.79,
             "risk_grade": "Very High",
         },
-        "holdings_list": _HDFC_RETIREMENT_HOLDINGS,
+        "holdings_loader": _load_hdfc_retirement_holdings,
         "pending": [
             ("PT-50101", "RELIANCE", "BUY",  60_000,  3097, 0, 1, "Unsettled"),
             ("PT-50102", "ICICIBANK", "BUY",  40_000,  1196, 0, 1, "Unsettled"),
@@ -355,7 +353,7 @@ FUND_SPECS_V2 = {
             "expense_ratio": 0.74,
             "risk_grade": "Very High",
         },
-        "holdings_list": _KOTAK_HOLDINGS,
+        "holdings_loader": _load_kotak_holdings,
         "pending": [
             ("PT-50101", "RELIANCE", "BUY",  60_000,  3097, 0, 1, "Unsettled"),
             ("PT-50102", "LT",       "BUY",  40_000,  3720, 0, 1, "Unsettled"),
@@ -384,7 +382,7 @@ FUND_SPECS_V2 = {
 # --------------------------------------------------------------------------- #
 def _build_ds_v2(spec: dict) -> dict:
     """Build dataset from real holdings + prices, with curated defaults for fields not present in raw feed."""
-    fund_holdings = spec["holdings_list"]
+    fund_holdings = spec["holdings_loader"]()
     fund_id = spec["meta"]["fund_id"]
 
     holdings = []
@@ -587,8 +585,26 @@ def _build_ds_v2(spec: dict) -> dict:
     }
 
 
-FUNDS_V2 = {fid: _build_ds_v2(spec) for fid, spec in FUND_SPECS_V2.items()}
+def build_datasets_from_source() -> dict:
+    """Build every fund dataset from the raw disclosures (XLSX) + price feed (CSV).
+
+    This is the *source* build used by ``scripts/init_db.py`` to populate the
+    database. The serving application does not call it when the DB is populated —
+    it reads the fully-built datasets back from the DB instead, so no XLSX/CSV/
+    tax-lot files are opened at request time.
+    """
+    global _PRICES_DICT
+    _PRICES_DICT = _load_prices()
+    return {fid: _build_ds_v2(spec) for fid, spec in FUND_SPECS_V2.items()}
+
+
 DEFAULT_FUND_ID_V2 = "HDFC-FLEXICAP-DG"
+
+# Serving datasets come from the database (the source of truth once init_db.py
+# has run). Only when the DB is unavailable/empty do we fall back to building
+# from the raw files, so a fresh checkout still works before the first seed.
+_DB_FUNDS = db.list_fund_datasets()
+FUNDS_V2 = _DB_FUNDS if _DB_FUNDS else build_datasets_from_source()
 
 
 # --------------------------------------------------------------------------- #
@@ -740,8 +756,16 @@ FUND_COMPLIANCE_LIMITS = {
 
 
 def get_fund_compliance_limits(fund_id: str | None = None):
-    """Return compliance limits tuned to the fund's mandate while preserving raw holdings."""
+    """Return compliance limits tuned to the fund's mandate while preserving raw holdings.
+
+    Prefers limits stored in the database (``fund_compliance_limits`` /
+    ``compliance_rules``); falls back to the in-code constants when the DB is
+    unavailable or does not carry the requested fund.
+    """
     fund_key = fund_id or DEFAULT_FUND_ID_V2
+    db_limits = db.get_compliance_limits(fund_key) or db.get_compliance_limits("DEFAULT")
+    if db_limits:
+        return db_limits
     return FUND_COMPLIANCE_LIMITS.get(fund_key, COMPLIANCE_LIMITS)
 
 

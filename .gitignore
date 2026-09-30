@@ -65,6 +65,20 @@ pnpm-debug.log*
 /backend/models/
 lightning_logs/
 
+# ---------- SQLite ----------
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# ---------- Local database folder ----------
+# Ignore the generated database (and anything else dropped here) but keep the
+# first-time-user README tracked.
+backend/database/*
+!backend/database/README.md
+
 # ---------- Misc ----------
 *.tmp
 *.bak

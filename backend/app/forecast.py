@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from . import data
+from . import data, db
 
 # Root directory for backend TFT models
 MODELS_DIR = Path(__file__).resolve().parent.parent / "models" / "tft"
@@ -89,15 +89,21 @@ def load_model(version: str | None = None) -> str:
         except Exception:
             pass
 
-    pred_file = PREDICTIONS_DIR / target_version / "predictions.json"
-    if target_version == "v2" and not pred_file.exists():
-        pred_file = PREDICTIONS_DIR / "predictions.json"
-    if pred_file.exists():
-        try:
-            with open(pred_file, "r", encoding="utf-8") as f:
-                predictions = json.load(f)
-        except Exception:
-            pass
+    # Prefer predictions stored in the database (latest run for this version);
+    # fall back to the on-disk predictions.json when the DB is unavailable/empty.
+    db_predictions = db.get_latest_predictions(target_version)
+    if db_predictions:
+        predictions = db_predictions
+    else:
+        pred_file = PREDICTIONS_DIR / target_version / "predictions.json"
+        if target_version == "v2" and not pred_file.exists():
+            pred_file = PREDICTIONS_DIR / "predictions.json"
+        if pred_file.exists():
+            try:
+                with open(pred_file, "r", encoding="utf-8") as f:
+                    predictions = json.load(f)
+            except Exception:
+                pass
 
     _CURRENT_VERSION = target_version
     _MODEL_METADATA = metadata

@@ -23,6 +23,8 @@ import json
 from datetime import date
 from pathlib import Path
 
+from . import db
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 TAX_RATES_JSON = REPO_ROOT / "data" / "processed" / "tax" / "tax_rates.json"
 
@@ -40,6 +42,10 @@ _DEFAULT_RATES = {
 
 
 def _load_rates() -> dict:
+    # Prefer rates stored in the database (source of truth once init_db.py runs).
+    db_rates = db.get_tax_rates()
+    if db_rates:
+        return {**_DEFAULT_RATES, **{k: v for k, v in db_rates.items() if k in _DEFAULT_RATES}}
     try:
         with open(TAX_RATES_JSON, "r", encoding="utf-8") as f:
             loaded = json.load(f)

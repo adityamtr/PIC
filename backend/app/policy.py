@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from . import data, data_v2
+from . import data, data_v2, db
 
 CRORE = data.CRORE
 POLICY_VERSION = "dummy-policy-2026-09-tax1"
@@ -49,6 +49,16 @@ POLICY_DEFAULTS = {
 ESG_EXCLUSIONS = {
     "ITC": {"activity": "tobacco production", "exposure_pct": 100.0},
 }
+
+# Overlay policy thresholds & ESG exclusions from the database when present, so
+# the DB is the runtime source of truth. In-code values remain the fallback and
+# guarantee every expected key exists even if the DB is missing entries.
+_DB_THRESHOLDS = db.get_policy_thresholds(POLICY_VERSION)
+if _DB_THRESHOLDS:
+    POLICY_DEFAULTS.update({k: v for k, v in _DB_THRESHOLDS.items() if v is not None})
+_DB_ESG = db.get_esg_exclusions()
+if _DB_ESG:
+    ESG_EXCLUSIONS = _DB_ESG
 
 
 def _limits(ds: dict) -> dict:
