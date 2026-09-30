@@ -17,6 +17,7 @@ from pathlib import Path
 
 from . import xlsx_parser
 from .security_metadata import curate_security_metadata
+from .tax_lots import attach_tax_data
 
 CRORE = 10_000_000
 
@@ -440,6 +441,8 @@ def _build_ds_v2(spec: dict) -> dict:
         holdings[-1].update(curate_security_metadata(
             ticker, industry, market_value * 100_000, base_price, TODAY,
         ))
+        # Synthetic tax lots (real historical cost prices) for tax-aware exits.
+        attach_tax_data(fund_id, holdings[-1], TODAY)
 
     equity = sum(h["market_value"] for h in holdings)
     cash_pct = CASH_PCT_BY_FUND.get(fund_id, 5.0)
