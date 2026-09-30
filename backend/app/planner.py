@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import math
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+
+import pandas_market_calendars as mcal
 
 from . import data, data_v2, forecast, optimizer, policy
 
@@ -86,6 +88,47 @@ def _order(ds, ticker, side, rupees=None, shares=None):
         "ticker": ticker, "name": _name_for(ds, ticker), "sector": _sector_for(ds, ticker),
         "side": side, "shares": shares, "price": price, "est_value": shares * price,
     }
+
+
+def _schedule_order_trade_dates(ds, orders, trade_date, settlement_date):
+    """Suggest regular-session dates, balancing orders by estimated ADV impact."""
+    session_range = {
+        "start_date": trade_date,
+        "end_date": settlement_date - timedelta(days=1),
+    }
+    trading_dates = mcal.get_calendar("NSE").valid_days(**session_range).intersection(
+        mcal.get_calendar("BSE").valid_days(**session_range)
+    ).date.tolist()
+
+    if not trading_dates:
+        return [
+            "No regular NSE trading session falls between the selected trade and "
+            "settlement dates; order trade dates were not suggested."
+        ]
+
+    def liquidity_load(order):
+        entity = policy._entity(ds, order["ticker"])
+        adv_cr = entity.get("adv_cr")
+        median_adv_cr = entity.get("median_adv_cr") or adv_cr
+        effective_adv_cr = min(adv_cr, median_adv_cr) if adv_cr and median_adv_cr else None
+        value_cr = float(order.get("est_value") or 0) / CRORE
+        return value_cr / effective_adv_cr if effective_adv_cr else value_cr
+
+    ordered = sorted(
+        orders,
+        key=lambda order: (
+            order.get("side") != "SELL",
+            -liquidity_load(order),
+            order.get("ticker", ""),
+        ),
+    )
+    daily_load = {day: 0.0 for day in trading_dates}
+    for order in ordered:
+        selected_date = min(trading_dates, key=lambda day: (daily_load[day], day))
+        order["trade_date"] = selected_date.isoformat()
+        daily_load[selected_date] += liquidity_load(order)
+
+    return []
 
 
 def _usable_price(price):
@@ -635,7 +678,14 @@ def generate_plan(fund_id, intent):
     action = (intent.get("action") or "contribution").lower()
     target = intent.get("target") or ""
     amount = float(intent.get("amount_cr") or 0) * CRORE
-    horizon = int(intent.get("horizon_days") or 5)
+    trade_date = intent.get("trade_date")
+    settlement_date = intent.get("settlement_date")
+    horizon = ((settlement_date - trade_date).days
+               if trade_date and settlement_date
+               else int(intent.get("horizon_days") or 5))
+    trade_date = trade_date.isoformat() if isinstance(trade_date, date) else trade_date
+    settlement_date = (settlement_date.isoformat()
+                       if isinstance(settlement_date, date) else settlement_date)
 
     # Resolve one or more target sectors. `targets` (list) takes precedence; a
     # single `target` (optionally comma-separated) is still accepted.
@@ -719,9 +769,18 @@ def generate_plan(fund_id, intent):
         orders, funding_sources, risk_notes, warnings = _orders_by_rules(
             ds, action, sectors, amount, investable, target)
 
+    if trade_date and settlement_date and horizon > 0:
+        warnings.extend(_schedule_order_trade_dates(
+            ds, orders, date.fromisoformat(trade_date), date.fromisoformat(settlement_date)))
+    elif trade_date:
+        for order in orders:
+            order["trade_date"] = trade_date
+
     # Annotate every order with its forecast expected 1-month return.
     for o in orders:
         o["expected_return"] = round(returns.get(o["ticker"], forecast.expected_return(o["ticker"])), 4)
+        if settlement_date:
+            o["settlement_date"] = settlement_date
 
     compliance = _compliance_checks(ds, orders, sectors)
     risks = _risk_flags(ds, orders, risk_notes, horizon)
@@ -759,7 +818,9 @@ def generate_plan(fund_id, intent):
         "intent": {"action": action, "target": target, "targets": raw_targets,
                    "resolved_sector": sectors[0] if len(sectors) == 1 else None,
                    "resolved_sectors": sectors,
-                   "amount_cr": intent.get("amount_cr"), "horizon_days": horizon, "note": intent.get("note"),
+                   "amount_cr": intent.get("amount_cr"), "horizon_days": horizon,
+                   "trade_date": trade_date, "settlement_date": settlement_date,
+                   "note": intent.get("note"),
                    "method": requested_method},
         "allocation_method": method_used,
         "optimization": opt_meta,
