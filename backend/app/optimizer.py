@@ -160,9 +160,10 @@ def optimize_buy(candidates, amount, aum, issuer_cap_frac, max_name_frac=0.34,
 # --------------------------------------------------------------------------- #
 # Sell: raise `amount` by selling the lowest expected-return names (removal)
 # --------------------------------------------------------------------------- #
-def optimize_sell(candidates, amount, max_name_frac=0.34):
+def optimize_sell(candidates, amount, max_name_frac=0.34, horizon_days=None):
     """
-    candidates: list of {ticker, price, sellable_shares, expected_return}
+    candidates: list of {ticker, price, sellable_shares, expected_return,
+                         tax_rate?, txn_rate?}
     amount:     rupees to raise
     Returns (sells, meta) where sells = [{ticker, shares}].
 
@@ -171,8 +172,14 @@ def optimize_sell(candidates, amount, max_name_frac=0.34):
     sell *value* per name — bounded by each position's sellable value — then
     rounded to whole shares. A continuous LP is far more robust and faster than a
     31-name mixed-integer program with million-share bounds, and rounding at
-    these sizes is immaterial. The objective minimizes rupee-weighted expected
-    return given up, so the lowest-forecast capital is liquidated first.
+    these sizes is immaterial.
+
+    Tax-aware: the objective minimizes forfeited expected return PLUS the exit
+    tax and transaction cost per rupee sold, so low-tax exits (LTCG lots, loss
+    lots — negative tax_rate) are preferred over short-term winners. The
+    forecast return is scaled over `horizon_days` (a ~21-trading-day month)
+    because tax is a one-time cost while a predicted loss repeats — a
+    persistent loser should be sold despite its tax bill.
     """
     _require()
     live = [c for c in candidates if c.get("sellable_shares", 0) > 0 and c["price"] > 0]
@@ -181,6 +188,10 @@ def optimize_sell(candidates, amount, max_name_frac=0.34):
 
     n = len(live)
     ret = np.array([c["expected_return"] for c in live], dtype=float)
+    tax = np.array([c.get("tax_rate", 0.0) for c in live], dtype=float)      # CGT per rupee sold
+    txn = np.array([c.get("txn_rate", 0.0) for c in live], dtype=float)      # STT + charges per rupee
+    horizon_scale = max(horizon_days, 1) / 21.0 if horizon_days else 1.0
+    cost = ret * horizon_scale + tax + txn
     price = np.array([c["price"] for c in live], dtype=float)               # rupees/share
     sellable_u = np.array([c["sellable_shares"] * c["price"] for c in live], dtype=float) / _UNIT  # crore
 
@@ -188,40 +199,64 @@ def optimize_sell(candidates, amount, max_name_frac=0.34):
 
     val = cp.Variable(n, nonneg=True)   # crore to sell per name
 
-    def _build(with_name_cap):
+    def _build(with_name_cap, coeff):
         cons = [val <= sellable_u, cp.sum(val) == target_u]
         if with_name_cap:
             # Spread the raise so no single name funds most of it (market impact).
             cons.append(val <= max_name_frac * target_u)
-        # ret @ val = expected 1M return (in crore) given up by selling that value.
-        return cp.Problem(cp.Minimize(ret @ val), cons)
+        # coeff @ val = horizon-scaled return given up + tax + txn cost (crore).
+        return cp.Problem(cp.Minimize(coeff @ val), cons)
 
-    prob = _build(with_name_cap=True)
-    solver, status = _solve_continuous(prob)
-    if status not in _OK:
-        # Too few names with capacity for the cap; relax it.
-        prob = _build(with_name_cap=False)
+    def _solve(coeff):
+        prob = _build(True, coeff)
         solver, status = _solve_continuous(prob)
-    if status not in _OK:
-        raise OptimizationFailed(f"sell optimization status: {status}")
+        if status not in _OK:
+            # Too few names with capacity for the cap; relax it.
+            prob = _build(False, coeff)
+            solver, status = _solve_continuous(prob)
+        if status not in _OK:
+            raise OptimizationFailed(f"sell optimization status: {status}")
+        return np.clip(np.asarray(val.value).flatten(), 0.0, None) * _UNIT, solver, status
 
-    val_rupees = np.clip(np.asarray(val.value).flatten(), 0.0, None) * _UNIT
+    val_rupees, solver, status = _solve(cost)
 
-    sells, given_up, raised = [], 0.0, 0.0
+    tax_aware = bool(np.any(tax != 0.0) or np.any(txn != 0.0))
+    # Demo storytelling: what would the tax-blind plan have cost in tax?
+    naive_tax_cr = None
+    if tax_aware:
+        try:
+            naive_rupees, _, _ = _solve(ret * horizon_scale)
+            naive_tax_cr = float((tax + txn) @ naive_rupees) / _UNIT
+        except OptimizationFailed:
+            naive_tax_cr = None
+
+    sells, given_up, raised, est_tax, est_txn = [], 0.0, 0.0, 0.0, 0.0
     for i, c in enumerate(live):
         shares = int(val_rupees[i] // price[i])
         if shares > 0:
+            value = shares * price[i]
             sells.append({"ticker": c["ticker"], "shares": shares})
-            given_up += ret[i] * shares * price[i]
-            raised += shares * price[i]
+            given_up += ret[i] * value
+            est_tax += tax[i] * value
+            est_txn += txn[i] * value
+            raised += value
 
     meta = {
         "status": status,
         "solver": solver,
-        "objective": "minimize expected 1M return given up (rupee-weighted) while raising the target",
+        "objective": ("minimize horizon-scaled expected return given up + exit tax "
+                      "+ transaction cost while raising the target"
+                      if tax_aware else
+                      "minimize expected 1M return given up (rupee-weighted) while raising the target"),
         "given_up_return_cr": round(given_up / _UNIT, 4),
         "amount_raised_cr": round(raised / _UNIT, 2),
     }
+    if tax_aware:
+        meta["est_tax_cr"] = round(est_tax / _UNIT, 4)
+        meta["est_txn_cost_cr"] = round(est_txn / _UNIT, 4)
+        meta["horizon_scale"] = round(horizon_scale, 3)
+        if naive_tax_cr is not None:
+            meta["tax_saved_vs_naive_cr"] = round(naive_tax_cr - (est_tax + est_txn) / _UNIT, 4)
     return sells, meta
 
 
@@ -244,6 +279,15 @@ def optimize_rebalance(holdings, aum, issuer_cap_frac, turnover_frac=0.15):
     ret = np.array([h["expected_return"] for h in holdings], dtype=float)
     w_cur = np.array([h["market_value"] / aum for h in holdings], dtype=float)
     invested = float(w_cur.sum())
+    # Exit tax + transaction cost per rupee sold; penalizes realized gains so
+    # the rebalance does not churn high-tax (short-term winner) positions.
+    # Clipped at 0: a position at a net loss has a negative rate here, and
+    # `-rate * cp.pos(...)` needs a nonneg coefficient to stay DCP-concave for
+    # Maximize (loss-harvesting reward is already handled by optimize_sell).
+    exit_cost = np.clip(np.array([
+        (h.get("effective_tax_rate_pct", 0.0) or 0.0) / 100
+        + (h.get("txn_cost_rate_pct", 0.0) or 0.0) / 100
+        for h in holdings], dtype=float), 0.0, None)
 
     w = cp.Variable(n)
     cons = [
@@ -252,7 +296,8 @@ def optimize_rebalance(holdings, aum, issuer_cap_frac, turnover_frac=0.15):
         w <= issuer_cap_frac,         # per-issuer cap
         cp.norm1(w - w_cur) <= turnover_frac,   # limit churn
     ]
-    prob = cp.Problem(cp.Maximize(ret @ w), cons)
+    tax_penalty = exit_cost @ cp.pos(w_cur - w)   # convex: tax applies to sells only
+    prob = cp.Problem(cp.Maximize(ret @ w - tax_penalty), cons)
     solver, status = _solve_continuous(prob)
     if status not in _OK:
         raise OptimizationFailed(f"rebalance optimization status: {status}")
@@ -265,10 +310,12 @@ def optimize_rebalance(holdings, aum, issuer_cap_frac, turnover_frac=0.15):
 
     exp_pre = float(ret @ w_cur)
     exp_post = float(ret @ w_new)
+    est_tax_cr = float(exit_cost @ np.clip(w_cur - w_new, 0.0, None)) * aum / _UNIT
     meta = {
         "status": status,
         "solver": solver,
-        "objective": "maximize expected 1M return within issuer cap + turnover budget",
+        "objective": "maximize expected 1M return net of exit tax, within issuer cap + turnover budget",
+        "est_tax_cr": round(est_tax_cr, 4),
         "expected_return_pre_pct": round(exp_pre * 100, 3),
         "expected_return_post_pct": round(exp_post * 100, 3),
         "turnover_budget_pct": round(turnover_frac * 100, 1),

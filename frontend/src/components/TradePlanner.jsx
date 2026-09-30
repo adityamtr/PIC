@@ -46,6 +46,7 @@ const fmtRet = (r) => (r == null ? '—' : `${(r * 100).toFixed(2)}%`)
 
 function OrdersTable({ orders }) {
   if (!orders.length) return <Typography color="text.secondary">No orders generated.</Typography>
+  const hasTax = orders.some((o) => o.tax)
   return (
     <ScrollX>
       <Table size="small" stickyHeader>
@@ -55,6 +56,7 @@ function OrdersTable({ orders }) {
             <TableCell align="right">Shares</TableCell><TableCell align="right">Price</TableCell>
             <TableCell align="right">Est. Value</TableCell>
             <TableCell align="right">Pred. 1-M Return</TableCell>
+            {hasTax && <TableCell align="right">Est. Tax</TableCell>}
           </TableRow>
         </TableHead>
         <TableBody>
@@ -74,6 +76,20 @@ function OrdersTable({ orders }) {
               <TableCell align="right" sx={{ color: o.expected_return >= 0 ? 'success.main' : 'error.main', fontWeight: 600 }}>
                 {fmtRet(o.expected_return)}
               </TableCell>
+              {hasTax && (
+                <TableCell align="right">
+                  {o.tax ? (
+                    <Stack direction="row" spacing={0.5} justifyContent="flex-end" alignItems="center">
+                      <Typography variant="body2"
+                        sx={{ color: o.tax.total_tax < 0 ? 'success.main' : 'text.primary', fontWeight: 600 }}>
+                        {fmtRupee(o.tax.total_tax, 0)}
+                      </Typography>
+                      {o.tax.stcg_gain !== 0 && <Chip size="small" variant="outlined" color="warning" label="STCG" />}
+                      {o.tax.ltcg_gain !== 0 && <Chip size="small" variant="outlined" color="info" label="LTCG" />}
+                    </Stack>
+                  ) : '—'}
+                </TableCell>
+              )}
             </TableRow>
           ))}
         </TableBody>
@@ -360,6 +376,11 @@ export default function TradePlanner({ fundId }) {
                 color={s.net_cash_impact < 0 ? 'error.main' : 'success.main'} />
               <Stat label="Compliance" value={<Chip label={s.compliance_status} color={sevOf(s.compliance_status)} size="small" />}
                 sub={decision ? decision.status : plan.status} />
+              {s.total_sell_value > 0 && (
+                <Stat label="Est. Exit Tax" value={fmtCrValue(toCr(s.est_total_tax), 2)}
+                  sub={`${s.tax_drag_bps} bps drag · ${s.stcg_share_pct}% STCG`}
+                  color={s.est_total_tax < 0 ? 'success.main' : s.tax_drag_bps > 60 ? 'error.main' : 'text.primary'} />
+              )}
             </KpiGrid>
 
             <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1 }}>
@@ -379,6 +400,10 @@ export default function TradePlanner({ fundId }) {
                 {opt.deployed_return_pct != null && <> · deployed-capital return {opt.deployed_return_pct}%</>}
                 {opt.given_up_return_cr != null && <> · return given up {fmtCrValue(opt.given_up_return_cr)} to raise {fmtCrValue(opt.amount_raised_cr)}</>}
                 {opt.expected_return_post_pct != null && <> · book return {opt.expected_return_pre_pct}% → {opt.expected_return_post_pct}% (turnover ≤ {opt.turnover_budget_pct}%)</>}
+                {opt.est_tax_cr != null && <> · est. tax {fmtCrValue(opt.est_tax_cr)}</>}
+                {opt.tax_saved_vs_naive_cr != null && opt.tax_saved_vs_naive_cr > 0 && (
+                  <> · <strong>tax-aware saved {fmtCrValue(opt.tax_saved_vs_naive_cr)} vs a tax-blind plan</strong></>
+                )}
               </Alert>
             )}
             {plan.warnings?.map((w, i) => <Alert key={i} severity="warning">{w}</Alert>)}
