@@ -14,6 +14,7 @@ APP_DIR = Path(__file__).resolve().parent
 BACKEND_DIR = APP_DIR.parent
 REPO_ROOT = BACKEND_DIR.parent
 MODELS_DIR = BACKEND_DIR / "models" / "tft"
+PREDICTIONS_DIR = BACKEND_DIR / "predictions"
 DEFAULT_DATA_PATH = REPO_ROOT / "data" / "processed" / "final" / "stock_macro_monthly_target.csv"
 
 FEATURES = [
@@ -239,7 +240,11 @@ def generate_predictions_for_version(
             continue
         predictions[str(ticker)] = round(float(value) / 100.0, 8)
 
-    destination = Path(output_path) if output_path is not None else version_dir / "predictions.json"
+    destination = (
+        Path(output_path)
+        if output_path is not None
+        else PREDICTIONS_DIR / version / "predictions.json"
+    )
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = destination.with_name(destination.name + ".tmp")
     temporary_path.write_text(json.dumps(predictions, indent=2) + "\n", encoding="utf-8")
@@ -247,7 +252,7 @@ def generate_predictions_for_version(
 
     from . import forecast
 
-    canonical_destination = (version_dir / "predictions.json").resolve()
+    canonical_destination = (PREDICTIONS_DIR / version / "predictions.json").resolve()
     if destination.resolve() == canonical_destination and forecast.get_active_model_info()["version"] == version:
         forecast.load_model(version)
 

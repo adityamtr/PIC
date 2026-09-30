@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ManualSelection(BaseModel):
@@ -44,7 +45,9 @@ class IntentRequest(BaseModel):
     amount_cr: Optional[float] = Field(
         None, ge=0, description="Amount in Rs crore (not required for rebalance)."
     )
-    horizon_days: int = Field(5, ge=1, le=30, description="Planning horizon (business days).")
+    trade_date: Optional[date] = Field(None, description="Planned trade date.")
+    settlement_date: Optional[date] = Field(None, description="Planned settlement date.")
+    horizon_days: int = Field(5, ge=1, le=33, description="Planning horizon (days).")
     method: Literal["manual", "rules", "optimize"] = Field(
         "optimize",
         description="Allocation method: 'manual' (use selected securities), 'rules' "
@@ -54,12 +57,22 @@ class IntentRequest(BaseModel):
     note: Optional[str] = Field(None, description="Free-text note from the PM.")
     fund_id: Optional[str] = Field(None, description="Fund to plan for (defaults to the default fund).")
 
+    @model_validator(mode="after")
+    def validate_date_range(self):
+        if self.trade_date and self.settlement_date:
+            days = (self.settlement_date - self.trade_date).days
+            if days < 1 or days > 33:
+                raise ValueError("Settlement date must be 1 to 33 days after the trade date.")
+        return self
+
     model_config = {
         "json_schema_extra": {
             "example": {
                 "action": "contribution",
                 "amount_cr": 250,
-                "horizon_days": 5,
+                "trade_date": "2026-09-30",
+                "settlement_date": "2026-10-02",
+                "horizon_days": 2,
                 "fund_id": "HDFC-TOP100-DG",
                 "note": "Deploy inflow across the book toward target weights.",
             }

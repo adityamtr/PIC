@@ -17,6 +17,35 @@ import { KpiGrid, Panel, ScrollX, Stat } from './ui'
 
 const toCr = (r) => r / 1e7
 const STEPS = ['PM Intent', 'Cash-Flow Planning', 'Trade Plan', 'Compliance & Risk', 'PIC Review']
+const MAX_SETTLEMENT_DAYS = 33
+const dateString = (date) => {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+const dateOffset = (days) => {
+  const date = new Date()
+  date.setDate(date.getDate() + days)
+  return dateString(date)
+}
+const dateOffsetFrom = (value, days) => {
+  if (!value) return undefined
+  const date = new Date(`${value}T00:00:00`)
+  date.setDate(date.getDate() + days)
+  return dateString(date)
+}
+const dateMonthOffset = (months) => {
+  const date = new Date()
+  const day = date.getDate()
+  date.setDate(1)
+  date.setMonth(date.getMonth() + months)
+  date.setDate(Math.min(day, new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate()))
+  return dateString(date)
+}
+const daysBetween = (start, end) => Math.round(
+  (Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86400000,
+)
 
 const ACTIONS = [
   { key: 'contribution', label: 'Contribution', needsAmount: true, needsTarget: false, hint: 'Deploy an inflow across the book toward target weights.' },
@@ -44,6 +73,11 @@ const sevOf = (s) => (s === 'FAIL' || s === 'BREACH' || s === 'HIGH' ? 'error'
   : s === 'WARN' || s === 'MEDIUM' ? 'warning' : 'success')
 
 const fmtRet = (r) => (r == null ? '—' : `${(r * 100).toFixed(2)}%`)
+const formatShortDate = (value) => {
+  if (!value) return '—'
+  const [year, month, day] = value.split('-')
+  return `${day}/${month}/${year.slice(-2)}`
+}
 const RISK_LABELS = {
   country: 'Portfolio exposure',
   liquidity: 'Execution liquidity',
@@ -159,8 +193,9 @@ function OrdersTable({ orders }) {
         <TableHead>
           <TableRow>
             <TableCell>Security</TableCell><TableCell>Side</TableCell>
+            <TableCell sx={{ whiteSpace: 'nowrap' }}>Trade Date</TableCell>
             <TableCell align="right">Shares</TableCell><TableCell align="right">Price</TableCell>
-            <TableCell align="right">Est. Value</TableCell>
+            <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>Est. Value</TableCell>
             <TableCell align="right">Pred. 1-M Return</TableCell>
             {hasTax && <TableCell align="right">Est. Tax</TableCell>}
           </TableRow>
@@ -176,9 +211,10 @@ function OrdersTable({ orders }) {
                 <Chip size="small" label={o.side}
                   color={o.side === 'BUY' ? 'success' : 'error'} variant="outlined" />
               </TableCell>
+              <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatShortDate(o.trade_date)}</TableCell>
               <TableCell align="right">{fmtNum(o.shares)}</TableCell>
               <TableCell align="right">{fmtRupee(o.price, 0)}</TableCell>
-              <TableCell align="right">{fmtCrValue(toCr(o.est_value))}</TableCell>
+              <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>{fmtCrValue(toCr(o.est_value))}</TableCell>
               <TableCell align="right" sx={{ color: o.expected_return >= 0 ? 'success.main' : 'error.main', fontWeight: 600 }}>
                 {fmtRet(o.expected_return)}
               </TableCell>
@@ -250,7 +286,8 @@ export default function TradePlanner({ fundId }) {
   const [targets, setTargets] = useState(['Information Technology'])
   const [manualSelections, setManualSelections] = useState([])
   const [manualSectorSelections, setManualSectorSelections] = useState([])
-  const [horizon, setHorizon] = useState(5)
+  const [tradeDate, setTradeDate] = useState(() => dateOffset(0))
+  const [settlementDate, setSettlementDate] = useState(() => dateOffset(2))
   const [method, setMethod] = useState('optimize')
   const [plan, setPlan] = useState(null)
   const [busy, setBusy] = useState(false)
@@ -260,6 +297,8 @@ export default function TradePlanner({ fundId }) {
   const [fundSectors, setFundSectors] = useState([])
   const [universe, setUniverse] = useState([])
   const [holdings, setHoldings] = useState([])
+  const today = dateOffset(0)
+  const latestTradeDate = dateMonthOffset(1)
   const securityOptions = [...universe, ...holdings.filter((h) => !universe.some((u) => u.ticker === h.ticker))]
 
   const cfg = ACTIONS.find((a) => a.key === action)
@@ -309,6 +348,12 @@ export default function TradePlanner({ fundId }) {
   }
 
   async function generate() {
+    const horizon = daysBetween(tradeDate, settlementDate)
+    if (horizon < 1 || horizon > MAX_SETTLEMENT_DAYS) {
+      setValidationWarning(`Settlement date must be 1 to ${MAX_SETTLEMENT_DAYS} days after the trade date.`)
+      setError(null)
+      return
+    }
     const manualAmounts = manualUsesSectors ? manualSectorSelections : manualSelections
     const hasNegativeManualAmount = method === 'manual'
       && manualAmounts.some((selection) => Number(selection.amount_cr) < 0)
@@ -326,7 +371,9 @@ export default function TradePlanner({ fundId }) {
         targets: cfg.needsTarget ? targets : undefined,
         manual_selections: method === 'manual' && !manualUsesSectors ? manualSelections : undefined,
         manual_sector_selections: method === 'manual' && manualUsesSectors ? manualSectorSelections : undefined,
-        horizon_days: Number(horizon),
+        trade_date: tradeDate,
+        settlement_date: settlementDate,
+        horizon_days: horizon,
         method,
         fund_id: fundId,
       }
@@ -494,10 +541,19 @@ export default function TradePlanner({ fundId }) {
               }}
               sx={{ width: { xs: '100%', sm: 150 }, flexShrink: 0 }} />
           )}
-          <TextField label="Horizon" size="small" select value={horizon}
-            onChange={(e) => setHorizon(e.target.value)} sx={{ width: { xs: '100%', sm: 130 }, flexShrink: 0 }}>
-            {[3, 5, 10, 15].map((d) => <MenuItem key={d} value={d}>{d} business days</MenuItem>)}
-          </TextField>
+          <TextField label="Trade date" type="date" size="small" value={tradeDate}
+            slotProps={{ htmlInput: { min: today, max: latestTradeDate } }}
+            onChange={(e) => { setTradeDate(e.target.value); setPlan(null); setDecision(null) }}
+            InputLabelProps={{ shrink: true }}
+            sx={{ width: { xs: '100%', sm: 170 }, flexShrink: 0 }} />
+          <TextField label="Settlement date" type="date" size="small" value={settlementDate}
+            slotProps={{ htmlInput: {
+              min: tradeDate,
+              max: dateOffsetFrom(tradeDate, MAX_SETTLEMENT_DAYS),
+            } }}
+            onChange={(e) => { setSettlementDate(e.target.value); setPlan(null); setDecision(null) }}
+            InputLabelProps={{ shrink: true }}
+            sx={{ width: { xs: '100%', sm: 190 }, flexShrink: 0 }} />
           <Button variant="contained" size="large" onClick={generate} disabled={busy}
             sx={{ width: 170, minWidth: 170, height: 40, flexShrink: 0 }}
             startIcon={busy ? <CircularProgress size={16} color="inherit" /> : null}>
@@ -523,7 +579,7 @@ export default function TradePlanner({ fundId }) {
             {/* Summary tiles — investable cash leads with an accent */}
             <KpiGrid min={190}>
               <Stat accent label="Investable Cash" value={fmtCrValue(toCr(s.investable_amount), 0)}
-                sub={`over ${plan.intent.horizon_days} business days`} color="secondary.main" />
+                sub={`${plan.intent.trade_date} to ${plan.intent.settlement_date}`} color="secondary.main" />
               <Stat label="Buy / Sell" value={`${fmtCrValue(toCr(s.total_buy_value), 0)}`}
                 sub={`sell ${fmtCrValue(toCr(s.total_sell_value), 0)} · ${s.order_count} orders`} />
               <Stat label="Net Cash Impact" value={fmtCrValue(toCr(s.net_cash_impact), 0)}
