@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
 import {
-  Alert, Box, Button, Checkbox, Chip, CircularProgress, Divider, Grow,
+  Accordion, AccordionDetails, AccordionSummary, Alert, Box, Button, Checkbox, Chip, CircularProgress, Divider, Grow,
   FormControl, InputLabel, ListItemText, MenuItem, Select, Stack, Step, StepLabel,
   Stepper, Table, TableBody, TableCell, TableHead, TableRow, TextField,
   ToggleButton, ToggleButtonGroup,
   Typography,
 } from '@mui/material'
 import CheckCircleIcon from '@mui/icons-material/CheckCircle'
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import EditIcon from '@mui/icons-material/EditOutlined'
 import CloseIcon from '@mui/icons-material/CloseOutlined'
 import NorthEastIcon from '@mui/icons-material/NorthEast'
@@ -43,6 +44,111 @@ const sevOf = (s) => (s === 'FAIL' || s === 'BREACH' || s === 'HIGH' ? 'error'
   : s === 'WARN' || s === 'MEDIUM' ? 'warning' : 'success')
 
 const fmtRet = (r) => (r == null ? '—' : `${(r * 100).toFixed(2)}%`)
+const RISK_LABELS = {
+  country: 'Portfolio exposure',
+  liquidity: 'Execution liquidity',
+  timing: 'Market timing',
+  lock_in: 'Lock-in constraints',
+  plan_creation: 'Plan validation',
+}
+const riskToneSx = (severity) => (theme) => {
+  const dark = theme.palette.mode === 'dark'
+  const tones = {
+    HIGH: dark
+      ? { color: '#F0B6B6', bgcolor: 'rgba(191, 68, 68, 0.14)', borderColor: 'rgba(240, 182, 182, 0.35)' }
+      : { color: '#873C3C', bgcolor: '#F8EEEE', borderColor: '#E8C9C9' },
+    MEDIUM: dark
+      ? { color: '#E6CA86', bgcolor: 'rgba(194, 152, 65, 0.14)', borderColor: 'rgba(230, 202, 134, 0.32)' }
+      : { color: '#755A24', bgcolor: '#F8F4E9', borderColor: '#E7D8B2' },
+  }
+  return tones[severity] || (dark
+    ? { color: '#B9C6D2', bgcolor: 'rgba(125, 145, 165, 0.14)', borderColor: 'rgba(185, 198, 210, 0.28)' }
+    : { color: '#526575', bgcolor: '#F0F4F7', borderColor: '#D7E0E8' })
+}
+
+function RiskRegister({ flags }) {
+  if (!flags.length) {
+    return <Typography color="text.secondary" variant="body2">No material execution risks.</Typography>
+  }
+
+  const grouped = flags.reduce((groups, flag) => {
+    const category = flag.type || 'other'
+    groups[category] = [...(groups[category] || []), flag]
+    return groups
+  }, {})
+  const groups = Object.entries(grouped).sort(([a], [b]) => a.localeCompare(b))
+
+  return (
+    <Box sx={{ maxHeight: 360, overflowY: 'auto' }}>
+      {groups.map(([category, items]) => {
+        const highCount = items.filter((item) => item.severity === 'HIGH').length
+        const reviewCount = items.filter((item) => item.severity === 'MEDIUM').length
+        return (
+          <Accordion key={category} disableGutters elevation={0} defaultExpanded={items.length <= 3}
+            sx={{
+              bgcolor: 'transparent',
+              borderBottom: 1,
+              borderColor: 'divider',
+              '&:before': { display: 'none' },
+            }}>
+            <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={{ px: 0, minHeight: 48,
+              '& .MuiAccordionSummary-content': { my: 1 } }}>
+              <Stack direction="row" alignItems="center" spacing={1} sx={{ flexWrap: 'wrap', pr: 1 }}>
+                <Typography variant="body2" fontWeight={700}>
+                  {RISK_LABELS[category] || category.replaceAll('_', ' ')}
+                </Typography>
+                <Chip size="small" variant="outlined" label={`${items.length} ${items.length === 1 ? 'risk' : 'risks'}`} />
+                {highCount > 0 && <Chip size="small" variant="outlined" sx={riskToneSx('HIGH')} label={`${highCount} high`} />}
+                {reviewCount > 0 && <Chip size="small" variant="outlined" sx={riskToneSx('MEDIUM')} label={`${reviewCount} review`} />}
+              </Stack>
+            </AccordionSummary>
+            <AccordionDetails sx={{ px: 0, pt: 0, pb: 1.5 }}>
+              <Stack divider={<Divider flexItem />}>
+                {items.map((flag, index) => (
+                  <Stack key={`${category}-${flag.ticker || 'scope'}-${index}`}
+                    direction={{ xs: 'column', sm: 'row' }} spacing={0.75}
+                    alignItems={{ sm: 'center' }} justifyContent="space-between"
+                    sx={{ py: 1, gap: 1 }}>
+                    <Box sx={{ minWidth: { sm: 130 }, flexShrink: 0 }}>
+                      <Typography variant="body2" fontWeight={700}>
+                        {flag.ticker || flag.entity || 'Portfolio'}
+                      </Typography>
+                    </Box>
+                    <Typography variant="body2" color="text.secondary" sx={{ flex: 1, minWidth: 0 }}>
+                      {flag.message}
+                    </Typography>
+                    <Chip size="small" label={flag.severity} variant="outlined" sx={riskToneSx(flag.severity)} />
+                  </Stack>
+                ))}
+              </Stack>
+            </AccordionDetails>
+          </Accordion>
+        )
+      })}
+    </Box>
+  )
+}
+
+function AdditionalPlanNotes({ warnings, riskFlags }) {
+  const representedFindings = new Set(riskFlags.map((flag) => flag.message))
+  const notes = warnings.filter((warning) => {
+    const separator = warning.indexOf(': ')
+    const message = separator >= 0 ? warning.slice(separator + 2) : warning
+    return !representedFindings.has(message)
+  })
+
+  if (!notes.length) return null
+  return (
+    <Box sx={{ borderLeft: 3, borderColor: 'warning.main', pl: 1.5 }}>
+      <Typography variant="caption" color="text.secondary" fontWeight={700}>
+        Additional plan notes
+      </Typography>
+      <Stack spacing={0.5} sx={{ mt: 0.5 }}>
+        {notes.map((note, index) => <Typography key={index} variant="body2">{note}</Typography>)}
+      </Stack>
+    </Box>
+  )
+}
 
 function OrdersTable({ orders }) {
   if (!orders.length) return <Typography color="text.secondary">No orders generated.</Typography>
@@ -133,6 +239,7 @@ export default function TradePlanner({ fundId }) {
   const [plan, setPlan] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
+  const [validationWarning, setValidationWarning] = useState('')
   const [decision, setDecision] = useState(null)
   const [fundSectors, setFundSectors] = useState([])
   const [universe, setUniverse] = useState([])
@@ -141,10 +248,19 @@ export default function TradePlanner({ fundId }) {
 
   const cfg = ACTIONS.find((a) => a.key === action)
   const manualUsesSectors = method === 'manual' && cfg.needsTarget
+  const hasExplicitManualAmounts = method === 'manual' && (
+    manualUsesSectors ? manualSectorSelections.length > 0 : manualSelections.length > 0
+  )
+  const needsTopLevelAmount = cfg.needsAmount && (
+    action === 'contribution' || !hasExplicitManualAmounts
+  )
   // Increase can target any buyable sector; Reduce only sectors the fund holds.
   const sectorOptions = action === 'increase'
     ? BUYABLE_SECTORS
     : (fundSectors.length ? fundSectors : BUYABLE_SECTORS)
+  const visibleManualSectorSelections = manualSectorSelections.filter(
+    (selection) => targets.includes(selection.sector) && sectorOptions.includes(selection.sector),
+  )
 
   // On fund change: clear any plan and load the fund's sectors for the dropdown.
   useEffect(() => {
@@ -177,11 +293,20 @@ export default function TradePlanner({ fundId }) {
   }
 
   async function generate() {
+    const manualAmounts = manualUsesSectors ? manualSectorSelections : manualSelections
+    const hasNegativeManualAmount = method === 'manual'
+      && manualAmounts.some((selection) => Number(selection.amount_cr) < 0)
+    if ((needsTopLevelAmount && Number(amount) < 0) || hasNegativeManualAmount) {
+      setValidationWarning('Amounts must be zero or greater. Correct the highlighted amount(s) before generating the plan.')
+      setError(null)
+      return
+    }
+    setValidationWarning('')
     setBusy(true); setError(null); setDecision(null); setPlan(null)
     try {
       const payload = {
         action,
-        amount_cr: cfg.needsAmount ? Number(amount) : undefined,
+        amount_cr: needsTopLevelAmount ? Number(amount) : undefined,
         targets: cfg.needsTarget ? targets : undefined,
         manual_selections: method === 'manual' && !manualUsesSectors ? manualSelections : undefined,
         manual_sector_selections: method === 'manual' && manualUsesSectors ? manualSectorSelections : undefined,
@@ -271,8 +396,14 @@ export default function TradePlanner({ fundId }) {
                   <Typography variant="body2" fontWeight={600}>{selection.ticker}</Typography>
                   <Stack direction="row" spacing={1} alignItems="center">
                     <TextField size="small" type="number" label="₹ Cr" value={selection.amount_cr}
-                      onChange={(e) => setManualSelections((current) => current.map((item) =>
-                        item.ticker === selection.ticker ? { ...item, amount_cr: e.target.value } : item))}
+                      error={Number(selection.amount_cr) < 0}
+                      helperText={Number(selection.amount_cr) < 0 ? 'Cannot be negative' : ' '}
+                      inputProps={{ min: 0 }}
+                      onChange={(e) => {
+                        setValidationWarning('')
+                        setManualSelections((current) => current.map((item) =>
+                          item.ticker === selection.ticker ? { ...item, amount_cr: e.target.value } : item))
+                      }}
                       sx={{ width: 105 }} />
                     <ToggleButtonGroup exclusive size="small" value={selection.side}
                       onChange={(_, side) => side && setManualSelections((current) => current.map((item) =>
@@ -285,44 +416,67 @@ export default function TradePlanner({ fundId }) {
               ))}
             </Stack>
           ) : cfg.needsTarget && (
-            <FormControl size="small" sx={{ width: { xs: '100%', sm: 300 }, flexShrink: 0 }}>
-              <InputLabel id="sector-targets-label">Sectors</InputLabel>
-              <Select labelId="sector-targets-label" label="Sectors" multiple
-              value={targets.filter((t) => sectorOptions.includes(t))}
-              onChange={(e) => {
-                const selected = e.target.value
-                setTargets(selected)
-                setManualSectorSelections(selected.map((sector) => ({
-                  sector,
-                  amount_cr: manualSectorSelections.find((item) => item.sector === sector)?.amount_cr || 0,
-                })))
-              }}
-              sx={{ width: '100%',
-                '& .MuiSelect-select': { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }}
-              renderValue={(selected) => selected.join(', ')}
-              MenuProps={{ disableAutoFocusItem: true }}>
-              {sectorOptions.map((sector) => (
-                <MenuItem key={sector} value={sector}>
-                  <Checkbox size="small" checked={targets.indexOf(sector) > -1} />
-                  <ListItemText primary={sector} />
-                </MenuItem>
-              ))}
-              </Select>
-              <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
-                Enter a separate amount for each selected sector.
-              </Typography>
-              {manualSectorSelections.map((selection) => (
-                <TextField key={selection.sector} size="small" type="number" label={`${selection.sector} (₹ Cr)`}
-                  value={selection.amount_cr}
-                  onChange={(e) => setManualSectorSelections((current) => current.map((item) =>
-                    item.sector === selection.sector ? { ...item, amount_cr: e.target.value } : item))}
-                  sx={{ width: '100%' }} />
-              ))}
-            </FormControl>
+            <Stack spacing={1.25} sx={{ width: { xs: '100%', sm: 520 }, maxWidth: '100%', minWidth: 0, flexShrink: 0 }}>
+              <FormControl size="small" sx={{ width: '100%', minWidth: 0 }}>
+                <InputLabel id="sector-targets-label">Sectors</InputLabel>
+                <Select labelId="sector-targets-label" label="Sectors" multiple
+                  value={targets.filter((t) => sectorOptions.includes(t))}
+                  onChange={(e) => {
+                    const selected = e.target.value
+                    setTargets(selected)
+                    setManualSectorSelections(selected.map((sector) => ({
+                      sector,
+                      amount_cr: manualSectorSelections.find((item) => item.sector === sector)?.amount_cr || 0,
+                    })))
+                  }}
+                  sx={{ width: '100%', minWidth: 0,
+                    '& .MuiSelect-select': { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }}
+                  renderValue={(selected) => selected.join(', ')}
+                  MenuProps={{ disableAutoFocusItem: true }}>
+                  {sectorOptions.map((sector) => (
+                    <MenuItem key={sector} value={sector}>
+                      <Checkbox size="small" checked={targets.indexOf(sector) > -1} />
+                      <ListItemText primary={sector} />
+                    </MenuItem>
+                  ))}
+                </Select>
+                <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
+                  Enter a separate amount for each selected sector.
+                </Typography>
+              </FormControl>
+              {manualUsesSectors && visibleManualSectorSelections.length > 0 && (
+                <Box sx={{ display: 'grid', gridTemplateColumns: { xs: 'minmax(0, 1fr)', sm: 'repeat(2, minmax(0, 1fr))' }, gap: 1.25 }}>
+                  {visibleManualSectorSelections.map((selection) => (
+                    <Box key={selection.sector} sx={{ minWidth: 0 }}>
+                      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
+                        {selection.sector}
+                      </Typography>
+                      <TextField size="small" type="number" label="Amount (₹ Cr)" value={selection.amount_cr}
+                        error={Number(selection.amount_cr) < 0}
+                        helperText={Number(selection.amount_cr) < 0 ? 'Cannot be negative' : ' '}
+                        inputProps={{ min: 0 }}
+                        onChange={(e) => {
+                          setValidationWarning('')
+                          setManualSectorSelections((current) => current.map((item) =>
+                            item.sector === selection.sector ? { ...item, amount_cr: e.target.value } : item))
+                        }}
+                        sx={{ width: '100%' }} />
+                    </Box>
+                  ))}
+                </Box>
+              )}
+            </Stack>
           )}
-          {cfg.needsAmount && method !== 'manual' && (
+          {needsTopLevelAmount && (
             <TextField label="Amount (₹ Cr)" size="small" type="number" value={amount}
-              onChange={(e) => setAmount(e.target.value)} sx={{ width: { xs: '100%', sm: 150 }, flexShrink: 0 }} />
+              error={Number(amount) < 0}
+              helperText={Number(amount) < 0 ? 'Cannot be negative' : ' '}
+              inputProps={{ min: 0 }}
+              onChange={(e) => {
+                setValidationWarning('')
+                setAmount(e.target.value)
+              }}
+              sx={{ width: { xs: '100%', sm: 150 }, flexShrink: 0 }} />
           )}
           <TextField label="Horizon" size="small" select value={horizon}
             onChange={(e) => setHorizon(e.target.value)} sx={{ width: { xs: '100%', sm: 130 }, flexShrink: 0 }}>
@@ -344,6 +498,7 @@ export default function TradePlanner({ fundId }) {
         </Stack>
       </Panel>
 
+      {validationWarning && <Alert severity="warning">{validationWarning}</Alert>}
       {error && <Alert severity="error">{error} — is the backend running on :8000?</Alert>}
 
       {plan && (
@@ -381,7 +536,7 @@ export default function TradePlanner({ fundId }) {
                 {opt.expected_return_post_pct != null && <> · book return {opt.expected_return_pre_pct}% → {opt.expected_return_post_pct}% (turnover ≤ {opt.turnover_budget_pct}%)</>}
               </Alert>
             )}
-            {plan.warnings?.map((w, i) => <Alert key={i} severity="warning">{w}</Alert>)}
+            <AdditionalPlanNotes warnings={plan.warnings || []} riskFlags={plan.risk_flags || []} />
 
             {/* Bento: the generated orders are the hero (wide, highlighted);
                 cash-flow + pending context ride a side rail. */}
@@ -478,15 +633,7 @@ export default function TradePlanner({ fundId }) {
                 </Box>
                 <Box>
                   <Typography variant="subtitle2" gutterBottom>Execution Risk</Typography>
-                  {plan.risk_flags.length === 0 ? <Typography color="text.secondary" variant="body2">No material execution risks.</Typography> : (
-                    <Stack spacing={1}>
-                      {plan.risk_flags.map((r, i) => (
-                        <Alert key={i} severity={sevOf(r.severity)} variant="outlined" sx={{ py: 0 }}>
-                          <strong>{r.type}</strong> — {r.message}
-                        </Alert>
-                      ))}
-                    </Stack>
-                  )}
+                  <RiskRegister flags={plan.risk_flags || []} />
                 </Box>
               </Box>
             </Panel>
