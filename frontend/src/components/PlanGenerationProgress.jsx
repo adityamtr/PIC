@@ -1,4 +1,4 @@
-import { Box, CircularProgress, LinearProgress, Stack, Typography } from '@mui/material'
+import { Box, CircularProgress, Fade, LinearProgress, Stack, Typography } from '@mui/material'
 import AccountBalanceWalletOutlinedIcon from '@mui/icons-material/AccountBalanceWalletOutlined'
 import AutoGraphOutlinedIcon from '@mui/icons-material/AutoGraphOutlined'
 import CheckIcon from '@mui/icons-material/Check'
@@ -9,27 +9,47 @@ import { Panel } from './ui'
 const STAGES = [
   {
     title: 'Validating portfolio manager intent',
-    detail: 'Confirming the action, dates, allocation method, and requested amount.',
+    steps: [
+      'Parsing the action, amount, target sectors, and allocation method.',
+      'Resolving selected sector names against the supported universe.',
+      'Checking the amount and trade-to-settlement horizon.',
+    ],
     icon: FactCheckOutlinedIcon,
   },
   {
     title: 'Reviewing available cash flow',
-    detail: 'Factoring in investable cash, commitments, and unsettled trades.',
+    steps: [
+      'Loading fund cash, reserve buffer, and unsettled trade impact.',
+      'Adding expected dividends and net subscription or redemption flows.',
+      'Deducting accrued expenses to calculate investable cash.',
+    ],
     icon: AccountBalanceWalletOutlinedIcon,
   },
   {
     title: 'Constructing the trade allocation',
-    detail: 'Building a rules-based, manual, or optimized order set.',
+    steps: [
+      'Generating one-month return forecasts for holdings and the universe.',
+      'Running the manual, rules-based, or convex-optimization allocation path.',
+      'Sizing share-level orders and assigning eligible NSE/BSE trade dates.',
+    ],
     icon: AutoGraphOutlinedIcon,
   },
   {
     title: 'Running compliance and risk checks',
-    detail: 'Testing concentration, liquidity, timing, tax, and execution constraints.',
+    steps: [
+      'Calculating sell-side tax lots and tax drag.',
+      'Reprojecting issuer, sector, and group concentration after trades.',
+      'Evaluating liquidity, lock-ins, events, and policy controls.',
+    ],
     icon: ShieldOutlinedIcon,
   },
   {
     title: 'Preparing the PIC review package',
-    detail: 'Assembling the recommendation, orders, and decision-ready findings.',
+    steps: [
+      'Compiling cash impact, orders, compliance results, and risk flags.',
+      'Selecting the recommendation from pass, warn, block, or escalation outcomes.',
+      'Creating the plan in Pending PIC Review for human decision.',
+    ],
     icon: FactCheckOutlinedIcon,
   },
 ]
@@ -91,6 +111,9 @@ export default function PlanGenerationProgress({ elapsedSeconds }) {
             const complete = elapsedSeconds >= completeAt
             const active = !complete && index === activeStageIndex
             const Icon = stage.icon
+            const visibleStepCount = complete
+              ? stage.steps.length
+              : active ? Math.min(stage.steps.length, elapsedSeconds - index * 3 + 1) : 0
 
             return (
               <Stack key={stage.title} direction="row" spacing={1.5} alignItems="flex-start"
@@ -103,7 +126,15 @@ export default function PlanGenerationProgress({ elapsedSeconds }) {
                 </Box>
                 <Box sx={{ minWidth: 0, pt: 0.25 }}>
                   <Typography variant="body2" fontWeight={active ? 800 : 700}>{stage.title}</Typography>
-                  <Typography variant="caption" color="text.secondary">{stage.detail}</Typography>
+                  <Stack spacing={0.35} sx={{ mt: 0.5 }}>
+                    {stage.steps.slice(0, visibleStepCount).map((step) => (
+                      <Fade key={step} in timeout={350}>
+                        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', lineHeight: 1.45 }}>
+                          {step}
+                        </Typography>
+                      </Fade>
+                    ))}
+                  </Stack>
                 </Box>
               </Stack>
             )
