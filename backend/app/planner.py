@@ -17,9 +17,9 @@ from __future__ import annotations
 
 import math
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
-from . import data, data_v2, forecast, optimizer, policy
+from . import data, data_v2, forecast, optimizer, policy, tax_lots, tax_rules
 
 CRORE = data.CRORE
 
@@ -158,8 +158,11 @@ def _build_buy_orders(ds, sector, amount):
 
 def _funding_sells(ds, gap, exclude_sectors=None):
     exclude = set(exclude_sectors or [])
+    # Lowest-conviction (weight) first; between similar weights prefer the
+    # cheaper-tax exit so the rules path is not tax-blind.
     candidates = sorted((h for h in ds["holdings"] if h["sector"] not in exclude),
-                        key=lambda h: h["weight"])
+                        key=lambda h: (round(h["weight"], 1),
+                                       h.get("effective_tax_rate_pct") or 0.0))
     sources, notes, remaining = [], [], gap
     for h in candidates:
         if remaining <= 0:
@@ -535,14 +538,18 @@ def _buy_candidates(ds, sectors, returns):
 def _sell_candidates(ds, sectors, returns):
     return [{"ticker": h["ticker"], "price": h["price"],
              "sellable_shares": _available_sellable_shares(ds, h),
-             "expected_return": returns.get(h["ticker"], 0.0)}
+             "expected_return": returns.get(h["ticker"], 0.0),
+             # Exit tax (blended STCG/LTCG over the synthetic lots; negative for
+             # loss positions) and transaction cost, per rupee of proceeds.
+             "tax_rate": (h.get("effective_tax_rate_pct") or 0.0) / 100,
+             "txn_rate": (h.get("txn_cost_rate_pct") or 0.0) / 100}
             for h in ds["holdings"]
             if (not sectors or h["sector"] in sectors)
             and _available_sellable_shares(ds, h) > 0
             and _usable_price(h["price"])]
 
 
-def _orders_by_optimizer(ds, action, sectors, amount, investable, returns):
+def _orders_by_optimizer(ds, action, sectors, amount, investable, returns, horizon_days=None):
     """Forecast-driven order generation. Returns the usual tuple plus an
     optimization-meta dict. Raises on solver problems so the caller can fall
     back to the rule-based path."""
@@ -591,10 +598,10 @@ def _orders_by_optimizer(ds, action, sectors, amount, investable, returns):
     elif action in ("redemption", "decrease", "sell", "trim", "raise_cash"):
         sec = sectors if action in ("decrease", "sell", "trim") else None
         candidates = _sell_candidates(ds, sec, returns)
-        sells, opt_meta = optimizer.optimize_sell(candidates, amount)
+        sells, opt_meta = optimizer.optimize_sell(candidates, amount, horizon_days=horizon_days)
         for sdict in sells:
             orders.append({**_order(ds, sdict["ticker"], "SELL", shares=sdict["shares"]),
-                           "reason": "Convex-optimized to minimize forecast return given up"})
+                           "reason": "Convex-optimized to minimize forecast return given up + exit tax"})
         raised = sum(o["est_value"] for o in orders if o["side"] == "SELL")
         if action == "redemption":
             funding_sources = [{"ticker": "OUTFLOW", "name": "Redemption / payout", "sector": "Cash",
@@ -625,6 +632,66 @@ def _orders_by_optimizer(ds, action, sectors, amount, investable, returns):
         warnings.append(f"Unknown action '{action}'.")
 
     return orders, funding_sources, risk_notes, warnings, opt_meta
+
+
+# --------------------------------------------------------------------------- #
+# Tax context for the policy layer
+# --------------------------------------------------------------------------- #
+_SELL_ACTIONS = ("redemption", "decrease", "sell", "trim", "raise_cash", "rebalance")
+
+
+def _tax_context(ds, orders, returns, action, horizon_days, as_of):
+    """Plan-level tax facts for policy: totals per term, and any predicted
+    loser that was kept only because its exit tax exceeded the expected loss
+    (tax is one-time; a predicted loss repeats)."""
+    total_tax = stcg_value = ltcg_gain_total = 0.0
+    for o in orders:
+        t = o.get("tax")
+        if not t:
+            continue
+        total_tax += t["total_tax"]
+        ltcg_gain_total += t["ltcg_gain"]
+        stcg_value += sum(l["shares"] for l in t["lots_consumed"]
+                          if l["term"] == "STCG") * o["price"]
+    # Annual Rs 1.25 lakh LTCG exemption, applied once at plan level (it is
+    # negligible at crore scale but kept for correctness).
+    exemption_relief = min(max(ltcg_gain_total, 0.0),
+                           tax_rules.LTCG_EXEMPTION_INR) * tax_rules.LTCG_RATE
+    total_tax = total_tax - exemption_relief
+    sell_value = sum(o["est_value"] for o in orders if o["side"] == "SELL")
+
+    held_due_to_tax = []
+    if action in _SELL_ACTIONS:
+        sold = {o["ticker"] for o in orders if o["side"] == "SELL"}
+        horizon_scale = max(horizon_days, 1) / 21.0
+        for h in ds["holdings"]:
+            r = returns.get(h["ticker"], 0.0)
+            if r >= 0 or h["ticker"] in sold or not h.get("tax_lots"):
+                continue
+            exit_rate = ((h.get("effective_tax_rate_pct") or 0.0)
+                         + (h.get("txn_cost_rate_pct") or 0.0)) / 100
+            if exit_rate <= 0 or exit_rate <= abs(r) * horizon_scale:
+                continue
+            stcg_maturities = [
+                tax_rules.ltcg_date(date.fromisoformat(l["acquisition_date"]))
+                for l in h["tax_lots"]
+                if tax_rules.classify_term(date.fromisoformat(l["acquisition_date"]), as_of) == "STCG"
+            ]
+            held_due_to_tax.append({
+                "ticker": h["ticker"],
+                "expected_return_pct": round(r * 100, 3),
+                "exit_cost_pct": round(exit_rate * 100, 3),
+                "ltcg_maturity": min(stcg_maturities).isoformat() if stcg_maturities else None,
+            })
+
+    return {
+        "est_total_tax": round(total_tax, 2),
+        "ltcg_exemption_relief": round(exemption_relief, 2),
+        "sell_value": sell_value,
+        "tax_drag_bps": round(total_tax / sell_value * 10_000, 1) if sell_value else 0.0,
+        "stcg_share_pct": round(stcg_value / sell_value * 100, 1) if sell_value else 0.0,
+        "held_due_to_tax": held_due_to_tax,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -709,7 +776,7 @@ def generate_plan(fund_id, intent):
         else:
             try:
                 orders, funding_sources, risk_notes, warnings, opt_meta = _orders_by_optimizer(
-                    ds, action, sectors, amount, investable, returns)
+                    ds, action, sectors, amount, investable, returns, horizon)
             except Exception as exc:  # solver / feasibility issue -> fall back
                 method_used = "rules"
                 orders, funding_sources, risk_notes, warnings = _orders_by_rules(
@@ -723,9 +790,27 @@ def generate_plan(fund_id, intent):
     for o in orders:
         o["expected_return"] = round(returns.get(o["ticker"], forecast.expected_return(o["ticker"])), 4)
 
+    # Attach the per-order tax breakdown (STCG/LTCG/STT over the synthetic
+    # lots, consumed least-tax-first) to every SELL, whatever the method.
+    as_of = date.today()
+    for o in orders:
+        if o["side"] != "SELL":
+            continue
+        h = data.holding(ds, o["ticker"])
+        if h and h.get("tax_lots"):
+            # Use the holding's real price for gains: `_order` prefers the
+            # synthetic universe price for the 14 universe tickers, which
+            # would distort gain/loss vs the real-history cost bases.
+            sale_price = h["price"] if _usable_price(h.get("price")) else o["price"]
+            breakdown = tax_lots.sale_tax_breakdown(h, sale_price, o["shares"], as_of)
+            if breakdown:
+                o["tax"] = breakdown
+
+    tax_context = _tax_context(ds, orders, returns, action, horizon, as_of)
+
     compliance = _compliance_checks(ds, orders, sectors)
     risks = _risk_flags(ds, orders, risk_notes, horizon)
-    policy_result = policy.evaluate(ds, orders, cfp, horizon)
+    policy_result = policy.evaluate(ds, orders, cfp, horizon, tax_context=tax_context)
     risks.extend(policy_result["risk_flags"])
     warnings.extend(policy_result["warnings"])
 
@@ -775,9 +860,20 @@ def generate_plan(fund_id, intent):
             "order_count": len(orders), "total_buy_value": total_buy,
             "total_sell_value": total_sell, "net_cash_impact": net_cash,
             "investable_amount": investable,
+            "est_total_tax": tax_context["est_total_tax"],
+            "est_total_tax_cr": round(tax_context["est_total_tax"] / CRORE, 4),
+            "tax_drag_bps": tax_context["tax_drag_bps"],
+            "stcg_share_pct": tax_context["stcg_share_pct"],
             "compliance_status": "FAIL" if has_fail else ("WARN" if has_warn else "PASS"),
             "policy_status": policy_result["status"],
             "execution_allowed": policy_result["execution_allowed"] and not has_fail,
+        },
+        "tax_summary": {
+            **tax_context,
+            "rates": tax_rules.RATES,
+            "note": ("Synthetic PMS-style capital-gains layer + real STT/charges. "
+                     "Actual Indian mutual funds are CGT-exempt at fund level "
+                     "(Section 10(23D)); see docs/taxation-model.md."),
         },
         "policy_checks": policy_result["checks"],
         "policy_summary": policy_result["summary"],
