@@ -2,12 +2,14 @@ import { useEffect, useState } from 'react'
 import {
   Accordion, AccordionDetails, AccordionSummary, Alert, Box, Button, Chip,
   CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, Divider,
-  Stack, Table, TableBody, TableCell, TableHead, TableRow, TextField, Typography,
+  Stack, Table, TableBody, TableCell, TableHead, TableRow, TextField, ToggleButton,
+  ToggleButtonGroup, Typography,
 } from '@mui/material'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import EmailOutlinedIcon from '@mui/icons-material/EmailOutlined'
 import CheckCircleIcon from '@mui/icons-material/CheckCircle'
 import CloseIcon from '@mui/icons-material/CloseOutlined'
+import ReactMarkdown from 'react-markdown'
 import { api } from '../api'
 import { fmtCrValue, fmtNum, fmtRupee } from '../format'
 import { Panel } from './ui'
@@ -186,6 +188,7 @@ export default function PlanHistory({ fundId }) {
   const [emailDraft, setEmailDraft] = useState(null)
   const [draftOpen, setDraftOpen] = useState(false)
   const [copyStatus, setCopyStatus] = useState('')
+  const [bodyMode, setBodyMode] = useState('preview')
 
   useEffect(() => {
     let active = true
@@ -225,6 +228,7 @@ export default function PlanHistory({ fundId }) {
       const draft = await api.generatePlanEmail(plan.plan_id)
       setEmailDraft(draft)
       setCopyStatus('')
+      setBodyMode('preview')
       setDraftOpen(true)
     } catch (error) {
       setActionError(error.message)
@@ -272,8 +276,40 @@ export default function PlanHistory({ fundId }) {
             </Alert>
             <TextField label="Subject" value={emailDraft?.subject || ''} fullWidth
               onChange={(event) => setEmailDraft((current) => ({ ...current, subject: event.target.value }))} />
-            <TextField label="Body" value={emailDraft?.body || ''} fullWidth multiline minRows={12}
-              onChange={(event) => setEmailDraft((current) => ({ ...current, body: event.target.value }))} />
+            <Stack direction="row" alignItems="center" justifyContent="space-between">
+              <Typography variant="subtitle2">Body</Typography>
+              <ToggleButtonGroup size="small" exclusive value={bodyMode} aria-label="Email body mode"
+                onChange={(_, value) => value && setBodyMode(value)}>
+                <ToggleButton value="edit">Edit</ToggleButton>
+                <ToggleButton value="preview">Preview</ToggleButton>
+              </ToggleButtonGroup>
+            </Stack>
+            {bodyMode === 'edit' ? (
+              <TextField label="Markdown body" value={emailDraft?.body || ''} fullWidth multiline minRows={12}
+                onChange={(event) => setEmailDraft((current) => ({ ...current, body: event.target.value }))} />
+            ) : (
+              <Box component="article" sx={{
+                minHeight: 280,
+                maxHeight: 460,
+                overflowY: 'auto',
+                overflowWrap: 'anywhere',
+                px: 2,
+                py: 1.5,
+                border: 1,
+                borderColor: 'divider',
+                borderRadius: 1,
+                '& h1, & h2, & h3': { mt: 2, mb: 1, fontWeight: 700, lineHeight: 1.3 },
+                '& h1': { fontSize: '1.25rem' },
+                '& h2': { fontSize: '1.1rem' },
+                '& h3': { fontSize: '1rem' },
+                '& p': { my: 1 },
+                '& ul, & ol': { pl: 3, my: 1 },
+                '& li': { mb: 0.5 },
+                '& > :first-of-type': { mt: 0 },
+              }}>
+                <ReactMarkdown>{emailDraft?.body || ''}</ReactMarkdown>
+              </Box>
+            )}
             {copyStatus && <Typography variant="caption" color="text.secondary">{copyStatus}</Typography>}
           </Stack>
         </DialogContent>

@@ -89,3 +89,4 @@ data/raw/mf.parquet
 data/processed/final/stock_macro_monthly_model.csv
 **/.ipynb_checkpoints/
 NUL
+.env
