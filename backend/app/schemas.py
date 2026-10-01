@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ManualSelection(BaseModel):
@@ -102,6 +102,29 @@ class EmailDraftResponse(BaseModel):
     subject: str
     body: str
     model: str
+
+
+class SendEmailRequest(BaseModel):
+    subject: str
+    body: str
+    model: str
+
+    @field_validator("subject", "body")
+    @classmethod
+    def require_non_empty_content(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Email fields must not be empty")
+        return value
+
+
+class SentEmailResponse(BaseModel):
+    plan_id: str
+    email_id: str
+    subject: str
+    body: str
+    model: str
+    sent_at: str
 
 
 # Plans are dynamic dicts; keep the response permissive.

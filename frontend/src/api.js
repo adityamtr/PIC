@@ -44,5 +44,10 @@ export const api = {
   createTradePlan: (intent) => post('/trade-plan', intent),
   tradePlans: (fundId) => get(`/trade-plans${qs(fundId)}`),
   generatePlanEmail: (planId) => post(`/trade-plan/${encodeURIComponent(planId)}/email-draft`, {}),
+  sendPlanEmail: (planId, content) => post(
+    `/trade-plan/${encodeURIComponent(planId)}/emails/send`,
+    content,
+  ),
+  planSentEmails: (planId) => get(`/trade-plan/${encodeURIComponent(planId)}/emails`),
   decide: (planId, decision) => post(`/trade-plan/${planId}/decision`, decision),
 }

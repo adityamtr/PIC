@@ -2,11 +2,13 @@ import { useEffect, useState } from 'react'
 import {
   Accordion, AccordionDetails, AccordionSummary, Alert, Box, Button, Chip,
   CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, Divider,
-  Stack, Table, TableBody, TableCell, TableHead, TableRow, TextField, ToggleButton,
-  ToggleButtonGroup, Typography,
+  IconButton, MenuItem, Stack, Table, TableBody, TableCell, TableHead, TableRow,
+  Snackbar, TextField, ToggleButton, ToggleButtonGroup, Typography,
 } from '@mui/material'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import EmailOutlinedIcon from '@mui/icons-material/EmailOutlined'
+import HistoryIcon from '@mui/icons-material/History'
+import SendOutlinedIcon from '@mui/icons-material/SendOutlined'
 import CheckCircleIcon from '@mui/icons-material/CheckCircle'
 import CloseIcon from '@mui/icons-material/CloseOutlined'
 import ReactMarkdown from 'react-markdown'
@@ -70,7 +72,7 @@ function PlanOrders({ orders = [] }) {
   )
 }
 
-function PlanRecord({ plan, onDecide, deciding, onGenerateEmail, generatingEmail }) {
+function PlanRecord({ plan, onDecide, deciding, onGenerateEmail, onViewEmails, generatingEmail }) {
   const status = decisionStatus(plan)
   const intent = plan.intent || {}
   const summary = plan.summary || {}
@@ -170,6 +172,10 @@ function PlanRecord({ plan, onDecide, deciding, onGenerateEmail, generatingEmail
                 disabled={!approved || generatingEmail} onClick={() => onGenerateEmail(plan)}>
                 {generatingEmail ? 'Drafting…' : 'Draft Email'}
               </Button>
+              <Button size="small" variant="outlined" startIcon={<HistoryIcon />}
+                disabled={!approved} onClick={() => onViewEmails(plan)}>
+                Email History
+              </Button>
             </Stack>
           </Stack>
         </Stack>
@@ -186,7 +192,12 @@ export default function PlanHistory({ fundId }) {
   const [deciding, setDeciding] = useState('')
   const [generatingEmail, setGeneratingEmail] = useState('')
   const [emailDraft, setEmailDraft] = useState(null)
+  const [sentEmails, setSentEmails] = useState([])
+  const [emailPlanId, setEmailPlanId] = useState('')
+  const [sendingEmail, setSendingEmail] = useState(false)
   const [draftOpen, setDraftOpen] = useState(false)
+  const [emailDialogMode, setEmailDialogMode] = useState('compose')
+  const [sentNotice, setSentNotice] = useState('')
   const [copyStatus, setCopyStatus] = useState('')
   const [bodyMode, setBodyMode] = useState('preview')
 
@@ -226,14 +237,54 @@ export default function PlanHistory({ fundId }) {
     setActionError('')
     try {
       const draft = await api.generatePlanEmail(plan.plan_id)
+      setEmailPlanId(plan.plan_id)
+      setSentEmails([])
       setEmailDraft(draft)
       setCopyStatus('')
       setBodyMode('preview')
+      setEmailDialogMode('compose')
       setDraftOpen(true)
     } catch (error) {
       setActionError(error.message)
     } finally {
       setGeneratingEmail('')
+    }
+  }
+
+  async function viewEmailHistory(plan) {
+    setActionError('')
+    try {
+      const result = await api.planSentEmails(plan.plan_id)
+      setEmailPlanId(plan.plan_id)
+      setSentEmails(result.emails || [])
+      setEmailDraft(result.emails?.[0] || null)
+      setCopyStatus('')
+      setBodyMode('preview')
+      setEmailDialogMode('history')
+      setDraftOpen(true)
+    } catch (error) {
+      setActionError(error.message)
+    }
+  }
+
+  async function sendEmailDraft() {
+    if (!emailDraft || !emailPlanId || emailDialogMode !== 'compose') return
+    setSendingEmail(true)
+    setCopyStatus('')
+    try {
+      const sent = await api.sendPlanEmail(emailPlanId, {
+        subject: emailDraft.subject,
+        body: emailDraft.body,
+        model: emailDraft.model,
+      })
+      setSentEmails((current) => [sent, ...current.filter((email) => email.email_id !== sent.email_id)])
+      setEmailDraft(null)
+      setDraftOpen(false)
+      setSentNotice('Sent to this plan’s email history. External delivery is not configured.')
+    } catch (error) {
+      setActionError(error.message)
+    } finally {
+      setSendingEmail(false)
     }
   }
 
@@ -262,62 +313,103 @@ export default function PlanHistory({ fundId }) {
             {plans.map((plan) => (
               <PlanRecord key={plan.plan_id} plan={plan} onDecide={decide}
                 deciding={deciding === plan.plan_id} onGenerateEmail={generateEmail}
+                onViewEmails={viewEmailHistory}
                 generatingEmail={generatingEmail === plan.plan_id} />
             ))}
           </Stack>
         )}
       </Panel>
       <Dialog open={draftOpen} onClose={() => setDraftOpen(false)} fullWidth maxWidth="md">
-        <DialogTitle>Email Template</DialogTitle>
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          {emailDialogMode === 'compose' ? 'Email Draft' : 'Sent Email History'}
+          <IconButton aria-label="Close email draft" onClick={() => setDraftOpen(false)} size="small">
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
         <DialogContent dividers>
           <Stack spacing={1.5}>
             <Alert severity="info">
-              Draft generated by {emailDraft?.model}. Review and edit it before sending; this app does not send email.
+              {emailDialogMode === 'compose'
+                ? `Review the draft before sending. It will appear in this plan’s history; external delivery is not configured.`
+                : 'These emails were marked sent from this plan. External delivery is not configured.'}
             </Alert>
-            <TextField label="Subject" value={emailDraft?.subject || ''} fullWidth
-              onChange={(event) => setEmailDraft((current) => ({ ...current, subject: event.target.value }))} />
-            <Stack direction="row" alignItems="center" justifyContent="space-between">
-              <Typography variant="subtitle2">Body</Typography>
-              <ToggleButtonGroup size="small" exclusive value={bodyMode} aria-label="Email body mode"
-                onChange={(_, value) => value && setBodyMode(value)}>
-                <ToggleButton value="edit">Edit</ToggleButton>
-                <ToggleButton value="preview">Preview</ToggleButton>
-              </ToggleButtonGroup>
-            </Stack>
-            {bodyMode === 'edit' ? (
-              <TextField label="Markdown body" value={emailDraft?.body || ''} fullWidth multiline minRows={12}
-                onChange={(event) => setEmailDraft((current) => ({ ...current, body: event.target.value }))} />
-            ) : (
-              <Box component="article" sx={{
-                minHeight: 280,
-                maxHeight: 460,
-                overflowY: 'auto',
-                overflowWrap: 'anywhere',
-                px: 2,
-                py: 1.5,
-                border: 1,
-                borderColor: 'divider',
-                borderRadius: 1,
-                '& h1, & h2, & h3': { mt: 2, mb: 1, fontWeight: 700, lineHeight: 1.3 },
-                '& h1': { fontSize: '1.25rem' },
-                '& h2': { fontSize: '1.1rem' },
-                '& h3': { fontSize: '1rem' },
-                '& p': { my: 1 },
-                '& ul, & ol': { pl: 3, my: 1 },
-                '& li': { mb: 0.5 },
-                '& > :first-of-type': { mt: 0 },
-              }}>
-                <ReactMarkdown>{emailDraft?.body || ''}</ReactMarkdown>
-              </Box>
+            {emailDialogMode === 'history' && sentEmails.length === 0 && (
+              <Typography variant="body2" color="text.secondary" sx={{ py: 2 }}>
+                No emails have been sent from this plan yet.
+              </Typography>
+            )}
+            {sentEmails.length > 0 && (
+              <TextField select label="Sent emails" value={emailDraft?.email_id || ''} fullWidth
+                onChange={(event) => setEmailDraft(sentEmails.find(
+                  (email) => email.email_id === event.target.value) || null)}>
+                {sentEmails.map((email) => (
+                  <MenuItem key={email.email_id} value={email.email_id}>
+                    {formatDate(email.sent_at)} · {email.subject}
+                  </MenuItem>
+                ))}
+              </TextField>
+            )}
+            {emailDraft && (
+              <>
+                <TextField label="Subject" value={emailDraft.subject} fullWidth
+                  InputProps={{ readOnly: emailDialogMode === 'history' }}
+                  onChange={(event) => setEmailDraft((current) => ({ ...current, subject: event.target.value }))} />
+                {emailDialogMode === 'compose' && (
+                  <Stack direction="row" alignItems="center" justifyContent="space-between">
+                    <Typography variant="subtitle2">Body</Typography>
+                    <ToggleButtonGroup size="small" exclusive value={bodyMode} aria-label="Email body mode"
+                      onChange={(_, value) => value && setBodyMode(value)}>
+                      <ToggleButton value="edit">Edit</ToggleButton>
+                      <ToggleButton value="preview">Preview</ToggleButton>
+                    </ToggleButtonGroup>
+                  </Stack>
+                )}
+                {emailDialogMode === 'compose' && bodyMode === 'edit' ? (
+                  <TextField label="Markdown body" value={emailDraft.body} fullWidth multiline minRows={12}
+                    onChange={(event) => setEmailDraft((current) => ({ ...current, body: event.target.value }))} />
+                ) : (
+                  <Box component="article" sx={{
+                    minHeight: 280,
+                    maxHeight: 460,
+                    overflowY: 'auto',
+                    overflowWrap: 'anywhere',
+                    px: 2,
+                    py: 1.5,
+                    border: 1,
+                    borderColor: 'divider',
+                    borderRadius: 1,
+                    '& h1, & h2, & h3': { mt: 2, mb: 1, fontWeight: 700, lineHeight: 1.3 },
+                    '& h1': { fontSize: '1.25rem' },
+                    '& h2': { fontSize: '1.1rem' },
+                    '& h3': { fontSize: '1rem' },
+                    '& p': { my: 1 },
+                    '& ul, & ol': { pl: 3, my: 1 },
+                    '& li': { mb: 0.5 },
+                    '& > :first-of-type': { mt: 0 },
+                  }}>
+                    <ReactMarkdown>{emailDraft.body}</ReactMarkdown>
+                  </Box>
+                )}
+              </>
             )}
             {copyStatus && <Typography variant="caption" color="text.secondary">{copyStatus}</Typography>}
           </Stack>
         </DialogContent>
         <DialogActions>
-          <Button onClick={copyEmailDraft}>Copy email</Button>
-          <Button onClick={() => setDraftOpen(false)}>Close</Button>
+          <Button onClick={copyEmailDraft} disabled={!emailDraft}>Copy email</Button>
+          {emailDialogMode === 'compose' && (
+            <Button onClick={sendEmailDraft} disabled={!emailDraft || sendingEmail} variant="contained"
+              startIcon={sendingEmail ? <CircularProgress size={14} color="inherit" /> : <SendOutlinedIcon />}>
+              Send
+            </Button>
+          )}
         </DialogActions>
       </Dialog>
+      <Snackbar open={Boolean(sentNotice)} autoHideDuration={5000} onClose={() => setSentNotice('')}>
+        <Alert severity="success" variant="filled" onClose={() => setSentNotice('')}>
+          {sentNotice}
+        </Alert>
+      </Snackbar>
     </Stack>
   )
 }
