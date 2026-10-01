@@ -16,8 +16,8 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import data_v2, db, forecast, planner
-from .schemas import DecisionRequest, DecisionResponse, IntentRequest
+from . import data_v2, db, email_draft, forecast, planner
+from .schemas import DecisionRequest, DecisionResponse, EmailDraftResponse, IntentRequest
 
 app = FastAPI(
     title="PIC Trade-Plan API",
@@ -195,12 +195,42 @@ def create_trade_plan(req: IntentRequest, fund_id: str | None = Query(None)):
     return plan
 
 
+@app.get("/api/trade-plans")
+def list_trade_plans(fund_id: str | None = Query(None)):
+    plans = db.list_plans(fund_id)
+    by_id = {plan["plan_id"]: plan for plan in (plans or []) if plan.get("plan_id")}
+    by_id.update({
+        plan_id: plan for plan_id, plan in _PLANS.items()
+        if fund_id is None or plan.get("fund", {}).get("fund_id") == fund_id
+    })
+    ordered = sorted(by_id.values(), key=lambda plan: plan.get("created_at") or "", reverse=True)
+    return {"plans": ordered, "count": len(ordered)}
+
+
 @app.get("/api/trade-plan/{plan_id}")
 def get_trade_plan(plan_id: str):
     plan = _load_plan(plan_id)
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
     return plan
+
+
+@app.post("/api/trade-plan/{plan_id}/email-draft", response_model=EmailDraftResponse)
+def generate_trade_plan_email(plan_id: str):
+    plan = _load_plan(plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    decision = (plan.get("decision") or {}).get("decision")
+    is_approved = decision == "Approve" if decision else str(plan.get("status", "")).lower().startswith("approved")
+    if not is_approved:
+        raise HTTPException(status_code=409, detail="Email drafts are available only for approved plans")
+    try:
+        draft = email_draft.generate_email_template(plan)
+    except email_draft.EmailDraftConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except email_draft.EmailDraftGenerationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return EmailDraftResponse(plan_id=plan_id, **draft)
 
 
 @app.post("/api/trade-plan/{plan_id}/decision", response_model=DecisionResponse)

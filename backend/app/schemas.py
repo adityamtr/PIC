@@ -97,5 +97,12 @@ class DecisionResponse(BaseModel):
     decided_at: str
 
 
+class EmailDraftResponse(BaseModel):
+    plan_id: str
+    subject: str
+    body: str
+    model: str
+
+
 # Plans are dynamic dicts; keep the response permissive.
 PlanResponse = dict[str, Any]

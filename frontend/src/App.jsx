@@ -12,6 +12,7 @@ import { api } from './api'
 import TradePlanner from './components/TradePlanner'
 import Portfolio from './components/Portfolio'
 import Trades from './components/Trades'
+import PlanHistory from './components/PlanHistory'
 
 export default function App() {
   const [mode, setMode] = useState(() => localStorage.getItem('pic-mode') || 'light')
@@ -75,6 +76,7 @@ export default function App() {
           <Tab label="Trade Planner" />
           <Tab label="Portfolio" />
           <Tab label="Trades" />
+          <Tab label="Plan History" />
         </Tabs>
       </AppBar>
 
@@ -85,6 +87,7 @@ export default function App() {
               {tab === 0 && <TradePlanner fundId={fundId} />}
               {tab === 1 && <Portfolio fundId={fundId} />}
               {tab === 2 && <Trades fundId={fundId} />}
+              {tab === 3 && <PlanHistory fundId={fundId} />}
             </Box>
           </Fade>
         )}
