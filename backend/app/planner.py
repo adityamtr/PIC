@@ -258,29 +258,24 @@ def _usable_price(price):
     return isinstance(price, (int, float)) and math.isfinite(price) and price > 0
 
 
-def _augment_pending_trades_from_approved_plans(fund_id):
-    """Fetch orders from approved, emailed plans in the DB and convert them to
-    pending-trade format so they reduce investable cash and sellable shares for
-    subsequent plans. Only plans that are both approved *and* have sent emails
-    (i.e. execution instructions were actually sent) are included — these are
-    real market commitments.
+def _approved_sent_plans(fund_id):
+    """Plans for this fund that are both approved *and* have sent emails (i.e.
+    execution instructions were actually sent) — real market commitments, as
+    opposed to "Pending PIC Review" / "Returned for Modification" / "Rejected"
+    / "Escalated" plans that never left the building.
 
-    Returns an empty list if DB is unavailable or no approved/emailed plans
-    exist. Never raises; degradation is graceful per db.py's fail-open contract."""
+    Returns an empty list if DB is unavailable or no such plans exist. Never
+    raises; degradation is graceful per db.py's fail-open contract."""
     try:
         plans = db.list_plans(fund_id) or []
     except Exception:
         return []
 
-    approved_trades = []
+    out = []
     for plan in plans:
         status_str = str(plan.get("status", "")).lower()
-        # Match "Approved — sent to Trading" and similar patterns, but exclude
-        # "Returned for Modification", "Rejected", "Pending PIC Review", "Escalated"
         if not any(s in status_str for s in ["approved", "sent to trading"]):
             continue
-
-        # Only include if execution email was actually sent (not just approved)
         try:
             sent_emails = db.list_sent_emails(plan.get("plan_id")) or []
             if not sent_emails:
@@ -288,7 +283,60 @@ def _augment_pending_trades_from_approved_plans(fund_id):
         except Exception:
             # If we can't check email status, don't include the plan (safer)
             continue
+        out.append(plan)
+    return out
 
+
+def _fy_start(as_of):
+    """Indian financial year start (Apr 1) covering `as_of`."""
+    year = as_of.year if as_of.month >= 4 else as_of.year - 1
+    return date(year, 4, 1)
+
+
+def _ltcg_exemption_used_this_fy(fund_id, as_of):
+    """Rs 1.25L LTCG exemption already consumed by this fund's approved+sent
+    plans so far this financial year, so a later plan in the same FY doesn't
+    apply the full exemption again."""
+    fy_start = _fy_start(as_of)
+    used = 0.0
+    for plan in _approved_sent_plans(fund_id):
+        created_at = plan.get("created_at")
+        try:
+            created_date = datetime.fromisoformat(created_at).date() if created_at else None
+        except (ValueError, TypeError):
+            created_date = None
+        if not created_date or created_date < fy_start:
+            continue
+        used += (plan.get("tax_summary") or {}).get("ltcg_exemption_used_inr", 0.0) or 0.0
+    return used
+
+
+def _consumed_tax_lots_by_ticker(fund_id):
+    """{ticker: {lot_id: shares_already_sold}} from approved+sent plans'
+    SELL orders, so a later plan doesn't attribute a sale against lot shares
+    that a prior executed plan already consumed (lots are read fresh from the
+    synthetic universe on every plan, so without this a lot could be "sold"
+    by two different plans)."""
+    consumed: dict[str, dict[str, int]] = {}
+    for plan in _approved_sent_plans(fund_id):
+        for order in plan.get("orders", []):
+            if order.get("side") != "SELL":
+                continue
+            for lot in (order.get("tax") or {}).get("lots_consumed", []):
+                lot_id, shares = lot.get("lot_id"), lot.get("shares")
+                if not lot_id or not shares:
+                    continue
+                by_lot = consumed.setdefault(order["ticker"], {})
+                by_lot[lot_id] = by_lot.get(lot_id, 0) + shares
+    return consumed
+
+
+def _augment_pending_trades_from_approved_plans(fund_id):
+    """Fetch orders from approved, emailed plans in the DB and convert them to
+    pending-trade format so they reduce investable cash and sellable shares for
+    subsequent plans."""
+    approved_trades = []
+    for plan in _approved_sent_plans(fund_id):
         for order in plan.get("orders", []):
             ticker = order.get("ticker")
             side = order.get("side")
@@ -878,7 +926,7 @@ def _orders_by_optimizer(ds, action, sectors, amount, investable, returns, horiz
 _SELL_ACTIONS = ("redemption", "decrease", "sell", "trim", "raise_cash", "rebalance")
 
 
-def _tax_context(ds, orders, returns, action, horizon_days, as_of):
+def _tax_context(ds, orders, returns, action, horizon_days, as_of, ltcg_exemption_used_this_fy=0.0):
     """Plan-level tax facts for policy: totals per term, and any predicted
     loser that was kept only because its exit tax exceeded the expected loss
     (tax is one-time; a predicted loss repeats)."""
@@ -891,10 +939,12 @@ def _tax_context(ds, orders, returns, action, horizon_days, as_of):
         ltcg_gain_total += t["ltcg_gain"]
         stcg_value += sum(l["shares"] for l in t["lots_consumed"]
                           if l["term"] == "STCG") * o["price"]
-    # Annual Rs 1.25 lakh LTCG exemption, applied once at plan level (it is
-    # negligible at crore scale but kept for correctness).
-    exemption_relief = min(max(ltcg_gain_total, 0.0),
-                           tax_rules.LTCG_EXEMPTION_INR) * tax_rules.LTCG_RATE
+    # Annual Rs 1.25 lakh LTCG exemption is a once-a-year allowance, not a
+    # once-a-plan one — net off whatever this fund's approved+sent plans
+    # already used so far this financial year before applying what's left.
+    exemption_remaining = max(tax_rules.LTCG_EXEMPTION_INR - ltcg_exemption_used_this_fy, 0.0)
+    exemption_used = min(max(ltcg_gain_total, 0.0), exemption_remaining)
+    exemption_relief = exemption_used * tax_rules.LTCG_RATE
     total_tax = total_tax - exemption_relief
     sell_value = sum(o["est_value"] for o in orders if o["side"] == "SELL")
 
@@ -925,6 +975,8 @@ def _tax_context(ds, orders, returns, action, horizon_days, as_of):
     return {
         "est_total_tax": round(total_tax, 2),
         "ltcg_exemption_relief": round(exemption_relief, 2),
+        "ltcg_exemption_used_inr": round(exemption_used, 2),
+        "ltcg_exemption_remaining_inr": round(exemption_remaining - exemption_used, 2),
         "sell_value": sell_value,
         "tax_drag_bps": round(total_tax / sell_value * 10_000, 1) if sell_value else 0.0,
         "stcg_share_pct": round(stcg_value / sell_value * 100, 1) if sell_value else 0.0,
@@ -983,6 +1035,24 @@ def iter_plan_steps(fund_id, intent):
         list(ds["pending_trades"]) +
         _augment_pending_trades_from_approved_plans(fund_id)
     )
+    as_of = date.today()
+    # Tax lots are reattached fresh from the synthetic universe on every plan,
+    # so without this a lot an approved+sent plan already sold would still
+    # show up as available and get "sold" again by a later plan. Copy the
+    # holdings (same shared-cache-mutation hazard as pending_trades above)
+    # before trimming any already-consumed lot quantities.
+    consumed_lots = _consumed_tax_lots_by_ticker(fund_id)
+    if consumed_lots:
+        ds["holdings"] = [dict(h) for h in ds["holdings"]]
+        for h in ds["holdings"]:
+            by_lot = consumed_lots.get(h["ticker"])
+            if by_lot:
+                tax_lots.apply_consumed_lots(h, by_lot, as_of)
+        # holdings_by_ticker is a separate index built from the old (cached)
+        # holding dicts — rebuild it from the copies so every lookup by
+        # ticker (data.holding(), policy.py weight checks, etc.) sees the
+        # adjusted tax lots too.
+        ds["holdings_by_ticker"] = {h["ticker"]: h for h in ds["holdings"]}
     action = (intent.get("action") or "contribution").lower()
     target = intent.get("target") or ""
     amount = float(intent.get("amount_cr") or 0) * CRORE
@@ -1143,7 +1213,6 @@ def iter_plan_steps(fund_id, intent):
 
     # Attach the per-order tax breakdown (STCG/LTCG/STT over the synthetic
     # lots, consumed least-tax-first) to every SELL, whatever the method.
-    as_of = date.today()
     for o in orders:
         if o["side"] != "SELL":
             continue
@@ -1157,7 +1226,16 @@ def iter_plan_steps(fund_id, intent):
             if breakdown:
                 o["tax"] = breakdown
 
-    tax_context = _tax_context(ds, orders, returns, action, horizon, as_of)
+    # Attach STT/stamp-duty/brokerage friction to every BUY (no CGT on a buy,
+    # but the transaction costs are real regardless of side).
+    for o in orders:
+        if o["side"] == "BUY" and o["est_value"] > 0:
+            o["txn_cost"] = tax_rules.buy_txn_cost(o["est_value"])
+
+    ltcg_exemption_used_this_fy = _ltcg_exemption_used_this_fy(fund_id, as_of)
+    tax_context = _tax_context(ds, orders, returns, action, horizon, as_of,
+                               ltcg_exemption_used_this_fy)
+    buy_txn_cost_total = sum(o["txn_cost"]["total_cost"] for o in orders if o.get("txn_cost"))
 
     compliance = _compliance_checks(ds, orders, sectors)
     risks = _risk_flags(ds, orders, risk_notes, horizon)
@@ -1185,6 +1263,17 @@ def iter_plan_steps(fund_id, intent):
     total_buy = sum(o["est_value"] for o in orders if o["side"] == "BUY")
     total_sell = sum(o["est_value"] for o in orders if o["side"] == "SELL")
     net_cash = total_sell - total_buy
+    # net_cash above is gross of trading cost: sell proceeds haven't been
+    # reduced by the exit tax actually paid on them, and buy value hasn't
+    # been grossed up by the STT/stamp duty actually owed on it. This is the
+    # reconciled figure - what cash the fund is actually left with once both
+    # sides' tax/transaction costs are paid.
+    net_cash_after_tax = net_cash - tax_context["est_total_tax"] - buy_txn_cost_total
+    # Surfaced on cfp (not as a line_item - it's a post-trade reconciliation,
+    # not one of the pre-trade cash-position components the other line_items
+    # sum to) so the Cash-Flow Planning panel can show pre- and post-trade
+    # cash side by side.
+    cfp["net_cash_after_tax"] = round(net_cash_after_tax, 2)
     # Value-weighted estimated market-impact cost/bps across all scheduled
     # orders (0 for any order that wasn't date-scheduled, e.g. no trade/
     # settlement window was supplied).
@@ -1237,11 +1326,15 @@ def iter_plan_steps(fund_id, intent):
         "summary": {
             "order_count": len(orders), "total_buy_value": total_buy,
             "total_sell_value": total_sell, "net_cash_impact": net_cash,
+            "net_cash_after_tax": round(net_cash_after_tax, 2),
+            "net_cash_after_tax_cr": round(net_cash_after_tax / CRORE, 4),
             "investable_amount": investable,
             "est_total_tax": tax_context["est_total_tax"],
             "est_total_tax_cr": round(tax_context["est_total_tax"] / CRORE, 4),
             "tax_drag_bps": tax_context["tax_drag_bps"],
             "stcg_share_pct": tax_context["stcg_share_pct"],
+            "est_total_buy_cost": round(buy_txn_cost_total, 2),
+            "est_total_buy_cost_cr": round(buy_txn_cost_total / CRORE, 4),
             "est_total_impact_cost": round(total_impact_cost, 0),
             "est_total_impact_cost_cr": round(total_impact_cost / CRORE, 4),
             "est_weighted_impact_bps": weighted_impact_bps,
@@ -1251,6 +1344,7 @@ def iter_plan_steps(fund_id, intent):
         },
         "tax_summary": {
             **tax_context,
+            "buy_txn_cost_total": round(buy_txn_cost_total, 2),
             "rates": tax_rules.RATES,
             "note": ("Synthetic PMS-style capital-gains layer + real STT/charges. "
                      "Actual Indian mutual funds are CGT-exempt at fund level "

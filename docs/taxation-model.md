@@ -20,16 +20,16 @@ PMS/taxable-account framing) to demonstrate a genuinely useful decision
 pattern — preferring low-tax exits and harvesting losses — that a fund
 manager evaluating "which holdings are more/less suitable to sell" would
 still care about in an advisory or non-exempt context. What *is* real
-regardless of the 10(23D) exemption is transaction friction: **STT, brokerage,
-and exchange charges apply on every sell**, and those are modeled with real
-current rates.
+regardless of the 10(23D) exemption is transaction friction: **STT, stamp
+duty, brokerage, and exchange charges apply on every buy and sell**, and
+those are modeled with real current rates.
 
 ## Real vs synthetic, at a glance
 
 | Data | Real | Synthetic |
 |---|---|---|
 | STCG rate (20%), LTCG rate (12.5%), Rs 1.25L exemption, 12-month holding threshold | Yes — current statutory rates | |
-| STT (0.10% sell), brokerage, exchange charges | Yes — market-standard rates | |
+| STT (0.10% both buy and sell), stamp duty (0.015% buy), brokerage, exchange charges | Yes — market-standard rates | |
 | Lot cost prices | Yes — actual `monthly_close` on the lot's acquisition date, from `data/processed/final/stock_macro_monthly_target.csv` | |
 | Lot acquisition dates, how many lots per holding, and which lots are "loss" lots | | Yes — no disclosure exposes a fund's purchase history, so these are generated |
 
@@ -46,12 +46,22 @@ change is a config edit:
 
 | Parameter | Value |
 |---|---|
-| STCG rate | 20% (holding < 12 months) |
-| LTCG rate | 12.5% (holding >= 12 months) |
-| LTCG annual exemption | Rs 1,25,000 (applied once at plan level) |
+| STCG statutory rate | 20% (holding < 12 months) |
+| LTCG statutory rate | 12.5% (holding >= 12 months) |
+| Surcharge | 15% of tax, capped regardless of income slab (Finance Act 2022, listed equity STCG/LTCG only) |
+| Cess | 4% of (tax + surcharge) |
+| STCG effective rate | 20% × 1.15 × 1.04 ≈ 23.92% |
+| LTCG effective rate | 12.5% × 1.15 × 1.04 ≈ 14.95% |
+| LTCG annual exemption | Rs 1,25,000, tracked per financial year across this fund's approved+sent plans (see below) |
 | STT on sell | 0.10% of sell value |
+| STT on buy | 0.10% of buy value |
 | Stamp duty on buy | 0.015% of buy value |
-| Brokerage + exchange charges | ~0.033% |
+| Brokerage + exchange charges | ~0.033% (both sides) |
+
+`tax_rules.STCG_RATE`/`LTCG_RATE` are the effective (surcharge+cess-inclusive)
+rates actually used in every CGT computation — that's the rupee amount
+payable. `STCG_STATUTORY_RATE`/`LTCG_STATUTORY_RATE` are the pre-surcharge
+statutory figures, kept only for display/decomposition.
 
 ## Synthetic tax lots
 
@@ -113,12 +123,44 @@ tax-blind one for storytelling.
   only because its exit cost exceeds the expected loss over the horizon,
   including the date its remaining STCG lots turn LTCG.
 
+## Buy-side transaction costs
+
+Every BUY order carries a `txn_cost` breakdown (`stt`, `stamp_duty`,
+`brokerage_and_exchange`, `total_cost`, `rate_pct`) from `tax_rules.buy_txn_cost()`.
+There is no CGT on a buy, but STT (0.1%, same rate as a sell) and stamp duty
+(0.015%, buy-side only) are real and previously weren't modeled — a buy used
+to cost nothing in plan output. The total rolls up into
+`summary.est_total_buy_cost_cr` and `tax_summary.buy_txn_cost_total`.
+
+## Cross-plan state: lot consumption and the annual exemption
+
+Two things used to reset on every plan generation even though they're really
+annual/transactional state, both fixed by reading this fund's **approved and
+emailed** plans (`planner._approved_sent_plans()` — the same "real market
+commitment" bar already used to reduce investable cash and sellable shares):
+
+- **Lot double-counting**: tax lots are reattached fresh from the synthetic
+  universe on every plan, so without this, a lot an earlier approved+sent plan
+  already sold would still show up as available and could be "sold" again by
+  a later plan. `planner._consumed_tax_lots_by_ticker()` sums `lots_consumed`
+  from those plans' SELL orders' `tax` breakdowns, and
+  `tax_lots.apply_consumed_lots()` trims each holding's lots by that amount
+  (recomputing `avg_cost`/`stcg_shares`/`ltcg_shares`/`effective_tax_rate_pct`
+  to match) before a new plan attributes any sale.
+- **LTCG exemption**: the Rs 1.25L allowance is annual, not per-plan.
+  `planner._ltcg_exemption_used_this_fy()` sums `ltcg_exemption_used_inr` from
+  this fund's approved+sent plans created since the current financial year
+  started (Apr 1), and `_tax_context()` applies only what's left of the
+  Rs 1.25L to a new plan. `tax_summary.ltcg_exemption_used_inr` /
+  `ltcg_exemption_remaining_inr` report this plan's consumption and the
+  remaining headroom.
+
+Both are no-ops for a fund's first plan in a period (nothing consumed yet) and
+degrade gracefully if the DB is unavailable (same fail-open contract as the
+rest of `db.py`).
+
 ## Known gaps (not addressed here)
 
 - No wash-sale rule (the app doesn't model reinvestment/repurchase).
-- The synthetic lots are attached at read time, not persisted per-fund
-  transactionally — a real system would need lot state to survive executed
-  trades across plans.
-- The SBI Nifty 50 ETF AUM parses incorrectly (`docs/trade-plan-data-requirements.md`
-  and the review notes both flag this); its rupee-scale tax figures inherit
-  that distortion until the parser is fixed.
+- No loss carry-forward across financial years — only intra-sale lot netting
+  and the same-FY exemption tracking above.
