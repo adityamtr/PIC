@@ -94,6 +94,15 @@ def get_fund(fund_id: str | None = Query(None)):
     return f
 
 
+@app.post("/api/fund/save")
+def save_fund(fund_id: str | None = Query(None)):
+    """Persist the current fund dataset to the database."""
+    ds = _ds(fund_id)
+    if db.save_fund_dataset(ds["id"], ds):
+        return {"status": "saved", "fund_id": ds["id"]}
+    raise HTTPException(status_code=503, detail="Fund data persistence unavailable")
+
+
 @app.get("/api/holdings")
 def get_holdings(fund_id: str | None = Query(None)):
     ds = _ds(fund_id)
@@ -202,8 +211,13 @@ def get_universe():
 # Trade-plan generation & PIC review
 # --------------------------------------------------------------------------- #
 def _load_plan(plan_id: str) -> dict | None:
-    """Fetch a plan from the DB, falling back to the in-memory cache."""
-    return db.get_plan(plan_id) or _PLANS.get(plan_id)
+    """Fetch a plan from the DB (source of truth). The in-memory cache is only
+    consulted when the DB itself is unreachable — never as a gap-filler for a
+    DB that is reachable but doesn't have the plan (e.g. after a reseed/reset),
+    or a since-approved/rejected plan would resurrect its pre-decision state."""
+    if db.available():
+        return db.get_plan(plan_id)
+    return _PLANS.get(plan_id)
 
 
 @app.post("/api/trade-plan")
@@ -253,13 +267,20 @@ async def create_trade_plan_stream(req: IntentRequest, fund_id: str | None = Que
 
 @app.get("/api/trade-plans")
 def list_trade_plans(fund_id: str | None = Query(None)):
+    # db.list_plans() returns None only when the DB is unreachable, and [] when
+    # it's reachable but has no rows (e.g. right after init_db.py --reset) — the
+    # two must stay distinguishable so a reset doesn't get backfilled by stale
+    # in-memory plans from before the reset.
     plans = db.list_plans(fund_id)
-    by_id = {plan["plan_id"]: plan for plan in (plans or []) if plan.get("plan_id")}
-    by_id.update({
-        plan_id: plan for plan_id, plan in _PLANS.items()
+    if plans is not None:
+        ordered = sorted(plans, key=lambda plan: plan.get("created_at") or "", reverse=True)
+        return {"plans": ordered, "count": len(ordered)}
+    # DB unreachable: in-memory cache is the only thing we have.
+    in_memory = [
+        plan for plan in _PLANS.values()
         if fund_id is None or plan.get("fund", {}).get("fund_id") == fund_id
-    })
-    ordered = sorted(by_id.values(), key=lambda plan: plan.get("created_at") or "", reverse=True)
+    ]
+    ordered = sorted(in_memory, key=lambda plan: plan.get("created_at") or "", reverse=True)
     return {"plans": ordered, "count": len(ordered)}
 
 

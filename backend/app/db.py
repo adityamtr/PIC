@@ -417,3 +417,70 @@ def save_decision(plan_id: str, status: str, decision: dict) -> bool:
     except sqlite3.Error:
         return False
     return True
+
+
+# --------------------------------------------------------------------------- #
+# Fund datasets (read / write)
+# --------------------------------------------------------------------------- #
+def save_fund_dataset(fund_id: str, dataset: dict) -> bool:
+    """Persist a fund's full dataset (holdings, cash, trades, etc.) to the database.
+    Returns True on success, False if unavailable."""
+    if not available():
+        return False
+    try:
+        fund = dataset.get("fund", {})
+        cash = dataset.get("cash", {})
+        ds_serializable = {k: v for k, v in dataset.items() if k != "holdings_by_ticker"}
+        with _LOCK, connect() as conn:
+            conn.execute(
+                "UPDATE funds SET aum = ?, cash_total = ?, cash_reserves = ?, dataset_json = ? "
+                "WHERE fund_id = ?",
+                (dataset.get("aum"), cash.get("total_cash"), cash.get("reserves"),
+                 json.dumps(ds_serializable, default=str), fund_id),
+            )
+    except sqlite3.Error:
+        return False
+    return True
+
+
+def get_fund_dataset(fund_id: str) -> dict | None:
+    """Load a fund's full dataset from the database, or None if unavailable."""
+    if not available():
+        return None
+    try:
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT dataset_json FROM funds WHERE fund_id = ?", (fund_id,)
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    if not row:
+        return None
+    try:
+        ds = json.loads(row["dataset_json"])
+        ds["holdings_by_ticker"] = {h["ticker"]: h for h in ds.get("holdings", [])}
+        return ds
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+
+def list_fund_datasets_all() -> dict[str, dict] | None:
+    """Return {fund_id: dataset} for all funds in the database, or None if unavailable."""
+    if not available():
+        return None
+    try:
+        with connect() as conn:
+            rows = conn.execute(
+                "SELECT fund_id, dataset_json FROM funds WHERE dataset_json IS NOT NULL"
+            ).fetchall()
+    except sqlite3.Error:
+        return None
+    datasets: dict[str, dict] = {}
+    for row in rows:
+        try:
+            ds = json.loads(row["dataset_json"])
+            ds["holdings_by_ticker"] = {h["ticker"]: h for h in ds.get("holdings", [])}
+            datasets[row["fund_id"]] = ds
+        except (TypeError, json.JSONDecodeError):
+            continue
+    return datasets or None
