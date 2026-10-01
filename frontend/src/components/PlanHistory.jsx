@@ -23,6 +23,38 @@ const formatDate = (value) => {
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
 }
+const riskGroupLabels = {
+  country: 'Portfolio exposure',
+  liquidity: 'Execution liquidity',
+  timing: 'Market timing',
+  lock_in: 'Lock-in constraints',
+  plan_creation: 'Plan validation',
+  taxation: 'Tax impact',
+}
+
+function summarizeRiskFlags(flags) {
+  const findings = new Map()
+  for (const flag of flags) {
+    const category = flag.type || 'other'
+    const severity = flag.severity || 'MEDIUM'
+    const message = flag.message || 'No description provided.'
+    const key = JSON.stringify([category, severity, message])
+    const finding = findings.get(key) || {
+      category,
+      severity,
+      message,
+      count: 0,
+      affected: new Set(),
+    }
+    finding.count += 1
+    if (flag.ticker || flag.entity) finding.affected.add(flag.ticker || flag.entity)
+    findings.set(key, finding)
+  }
+  return [...findings.values()].map((finding) => ({
+    ...finding,
+    affected: [...finding.affected],
+  }))
+}
 
 function decisionStatus(plan) {
   const rawStatus = (plan.status || '').toLowerCase()
@@ -80,6 +112,14 @@ function PlanRecord({ plan, onDecide, deciding, onGenerateEmail, onViewEmails, g
   const method = plan.allocation_method || intent.method || '—'
   const pendingReview = status.label === 'Pending review'
   const approved = status.label === 'Approved'
+  const riskFlags = plan.risk_flags || []
+  const riskFindings = summarizeRiskFlags(riskFlags)
+  const riskGroups = riskFindings.reduce((groups, finding) => {
+    groups[finding.category] = [...(groups[finding.category] || []), finding]
+    return groups
+  }, {})
+  const highRiskCount = riskFindings.filter((finding) => finding.severity === 'HIGH').length
+  const reviewRiskCount = riskFindings.filter((finding) => finding.severity === 'MEDIUM').length
 
   return (
     <Accordion disableGutters elevation={0} sx={{
@@ -140,17 +180,54 @@ function PlanRecord({ plan, onDecide, deciding, onGenerateEmail, onViewEmails, g
             </Box>
           )}
 
-          {plan.risk_flags?.length > 0 && (
-            <Box>
-              <Typography variant="subtitle2" sx={{ mb: 0.75 }}>Risk Flags</Typography>
-              <Stack spacing={0.5}>
-                {plan.risk_flags.map((flag, index) => (
-                  <Typography key={`${flag.type}-${index}`} variant="body2" color="text.secondary">
-                    {flag.severity}: {flag.message}
-                  </Typography>
-                ))}
-              </Stack>
-            </Box>
+          {riskFlags.length > 0 && (
+            <Accordion disableGutters elevation={0} defaultExpanded={riskFlags.length <= 5}
+              sx={{ border: 1, borderColor: 'divider', borderRadius: 1, '&:before': { display: 'none' } }}>
+              <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={{ px: 1.5 }}>
+                <Stack direction="row" alignItems="center" spacing={1} sx={{ flexWrap: 'wrap', pr: 1 }}>
+                  <Typography variant="subtitle2">Risk review</Typography>
+                  <Chip size="small" variant="outlined" label={`${riskFlags.length} flags`} />
+                  {riskFindings.length < riskFlags.length && (
+                    <Chip size="small" variant="outlined" label={`${riskFindings.length} distinct findings`} />
+                  )}
+                  {highRiskCount > 0 && <Chip size="small" color="error" variant="outlined" label={`${highRiskCount} high`} />}
+                  {reviewRiskCount > 0 && <Chip size="small" color="warning" variant="outlined" label={`${reviewRiskCount} review`} />}
+                </Stack>
+              </AccordionSummary>
+              <AccordionDetails sx={{ px: 1.5, pt: 0 }}>
+                <Stack spacing={1.5}>
+                  {Object.entries(riskGroups).map(([category, findings]) => (
+                    <Box key={category}>
+                      <Typography variant="caption" color="text.secondary" fontWeight={700}>
+                        {riskGroupLabels[category] || category.replaceAll('_', ' ')}
+                      </Typography>
+                      <Stack divider={<Divider flexItem />}>
+                        {findings.map((finding) => (
+                          <Stack key={`${finding.category}-${finding.severity}-${finding.message}`}
+                            direction={{ xs: 'column', sm: 'row' }} alignItems={{ sm: 'flex-start' }}
+                            spacing={0.75} sx={{ py: 1 }}>
+                            <Chip size="small" label={finding.severity} variant="outlined"
+                              color={finding.severity === 'HIGH' ? 'error' : finding.severity === 'MEDIUM' ? 'warning' : 'default'} />
+                            <Box sx={{ flex: 1, minWidth: 0 }}>
+                              <Typography variant="body2">{finding.message}</Typography>
+                              {finding.affected.length > 0 && (
+                                <Typography variant="caption" color="text.secondary">
+                                  Affected: {finding.affected.slice(0, 5).join(', ')}
+                                  {finding.affected.length > 5 ? `, +${finding.affected.length - 5} more` : ''}
+                                </Typography>
+                              )}
+                            </Box>
+                            {finding.count > 1 && (
+                              <Chip size="small" variant="outlined" label={`${finding.count} occurrences`} />
+                            )}
+                          </Stack>
+                        ))}
+                      </Stack>
+                    </Box>
+                  ))}
+                </Stack>
+              </AccordionDetails>
+            </Accordion>
           )}
 
           <Divider />
