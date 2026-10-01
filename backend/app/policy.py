@@ -53,12 +53,21 @@ ESG_EXCLUSIONS = {
 # Overlay policy thresholds & ESG exclusions from the database when present, so
 # the DB is the runtime source of truth. In-code values remain the fallback and
 # guarantee every expected key exists even if the DB is missing entries.
-_DB_THRESHOLDS = db.get_policy_thresholds(POLICY_VERSION)
-if _DB_THRESHOLDS:
-    POLICY_DEFAULTS.update({k: v for k, v in _DB_THRESHOLDS.items() if v is not None})
-_DB_ESG = db.get_esg_exclusions()
-if _DB_ESG:
-    ESG_EXCLUSIONS = _DB_ESG
+#
+# refresh_policy_from_db() is re-run at the top of evaluate() (every plan), not
+# just once at import — otherwise reseeding the DB (e.g. `init_db.py --reset`)
+# would silently keep being ignored by an already-running server until restart.
+def refresh_policy_from_db() -> None:
+    db_thresholds = db.get_policy_thresholds(POLICY_VERSION)
+    if db_thresholds:
+        POLICY_DEFAULTS.update({k: v for k, v in db_thresholds.items() if v is not None})
+    db_esg = db.get_esg_exclusions()
+    if db_esg:
+        ESG_EXCLUSIONS.clear()
+        ESG_EXCLUSIONS.update(db_esg)
+
+
+refresh_policy_from_db()
 
 
 def _limits(ds: dict) -> dict:
@@ -480,6 +489,7 @@ def _tax_checks(ds: dict, orders: list[dict], tax_context: dict) -> list[dict]:
 def evaluate(ds: dict, orders: list[dict], cash_flow: dict, horizon_days: int,
              tax_context: dict | None = None) -> dict:
     """Evaluate the proposed order set against the dummy policy controls."""
+    refresh_policy_from_db()
     limits = _limits(ds)
     checks = _concentration_checks(ds, orders, limits)
     checks.extend(_order_checks(ds, orders, cash_flow, horizon_days))

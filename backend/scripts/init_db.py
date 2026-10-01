@@ -271,9 +271,12 @@ CREATE TABLE IF NOT EXISTS tax_rules (
     financial_year       TEXT PRIMARY KEY,
     stcg_rate_pct        REAL,
     ltcg_rate_pct        REAL,
+    surcharge_pct        REAL,
+    cess_pct             REAL,
     ltcg_exemption_inr   REAL,
     ltcg_holding_months  INTEGER,
     stt_sell_pct         REAL,
+    stt_buy_pct          REAL,
     stamp_duty_buy_pct   REAL,
     brokerage_pct        REAL,
     exchange_charges_pct REAL
@@ -692,13 +695,15 @@ def seed_compliance(conn: sqlite3.Connection) -> dict[str, int]:
     r = tax_rules.RATES
     conn.execute(
         "INSERT OR REPLACE INTO tax_rules "
-        "(financial_year, stcg_rate_pct, ltcg_rate_pct, ltcg_exemption_inr, "
-        " ltcg_holding_months, stt_sell_pct, stamp_duty_buy_pct, brokerage_pct, "
-        " exchange_charges_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "(financial_year, stcg_rate_pct, ltcg_rate_pct, surcharge_pct, cess_pct, "
+        " ltcg_exemption_inr, ltcg_holding_months, stt_sell_pct, stt_buy_pct, "
+        " stamp_duty_buy_pct, brokerage_pct, exchange_charges_pct) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             r.get("financial_year"), _f(r.get("stcg_rate_pct")), _f(r.get("ltcg_rate_pct")),
+            _f(r.get("surcharge_pct")), _f(r.get("cess_pct")),
             _f(r.get("ltcg_exemption_inr")), _i(r.get("ltcg_holding_months")),
-            _f(r.get("stt_sell_pct")), _f(r.get("stamp_duty_buy_pct")),
+            _f(r.get("stt_sell_pct")), _f(r.get("stt_buy_pct")), _f(r.get("stamp_duty_buy_pct")),
             _f(r.get("brokerage_pct")), _f(r.get("exchange_charges_pct")),
         ),
     )

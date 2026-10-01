@@ -117,9 +117,9 @@ def set_active_model_version(version: str) -> str:
 
 
 def get_active_model_info() -> dict[str, Any]:
-    """Return info about the active model version."""
-    if _CURRENT_VERSION is None:
-        load_model()
+    """Return info about the active model version. Reloads from the DB each
+    call so a reseeded DB is reflected without a server restart."""
+    load_model(_CURRENT_VERSION)
     return {
         "version": _CURRENT_VERSION,
         "model_name": f"TemporalFusionTransformer ({_CURRENT_VERSION})",
@@ -138,9 +138,13 @@ def expected_return(ticker: str) -> float:
 
 
 def predict_returns(tickers) -> dict[str, float]:
-    """Predicted 1-month returns (fraction) for a list of tickers from active model."""
-    if _CURRENT_VERSION is None:
-        load_model()
+    """Predicted 1-month returns (fraction) for a list of tickers from active model.
+
+    Reloads the active version's predictions from the DB first (once per plan,
+    not per ticker) so a reseeded DB (e.g. `init_db.py --reset`) is picked up by
+    an already-running server without requiring a restart.
+    """
+    load_model(_CURRENT_VERSION)
     return {t: expected_return(t) for t in tickers}
 
 

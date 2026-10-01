@@ -211,6 +211,29 @@ def _load_persisted() -> dict:
     return persisted
 
 
+def _refresh_derived_fields(holding: dict, as_of: date) -> None:
+    """Recompute avg_cost/stcg-ltcg split/effective rate from whatever is
+    currently in holding["tax_lots"]. Shared by `attach_tax_data` and
+    `apply_consumed_lots` (the latter mutates the lot list after the fact, so
+    the derived fields need to be redone the same way)."""
+    lots = holding.get("tax_lots") or []
+    price = holding.get("price")
+    total_cost = sum(l["cost_price"] * l["quantity"] for l in lots)
+    total_qty = sum(l["quantity"] for l in lots)
+    avg_cost = round(total_cost / total_qty, 2) if total_qty else None
+    stcg_shares = sum(l["quantity"] for l in lots
+                      if classify_term(date.fromisoformat(l["acquisition_date"]), as_of) == "STCG")
+
+    holding["avg_cost"] = avg_cost
+    holding["unrealized_gain_pct"] = (
+        round((price - avg_cost) / avg_cost * 100, 2)
+        if price and avg_cost else None)
+    holding["stcg_shares"] = stcg_shares
+    holding["ltcg_shares"] = total_qty - stcg_shares
+    holding["effective_tax_rate_pct"] = round(
+        effective_tax_rate(lots, price, as_of) * 100, 3) if price else 0.0
+
+
 def attach_tax_data(fund_id: str, holding: dict, as_of: date) -> None:
     """Attach tax lots + derived tax fields to a holding (mutates in place)."""
     isin = holding.get("isin") or holding.get("ticker")
@@ -225,23 +248,29 @@ def attach_tax_data(fund_id: str, holding: dict, as_of: date) -> None:
         lots = generate_lots(isin, holding.get("ticker", isin), shares, price, as_of)
         tax_source = "generated_synthetic"
 
-    total_cost = sum(l["cost_price"] * l["quantity"] for l in lots)
-    total_qty = sum(l["quantity"] for l in lots)
-    avg_cost = round(total_cost / total_qty, 2) if total_qty else None
-    stcg_shares = sum(l["quantity"] for l in lots
-                      if classify_term(date.fromisoformat(l["acquisition_date"]), as_of) == "STCG")
-
     holding["tax_lots"] = lots
-    holding["avg_cost"] = avg_cost
-    holding["unrealized_gain_pct"] = (
-        round((price - avg_cost) / avg_cost * 100, 2)
-        if price and avg_cost else None)
-    holding["stcg_shares"] = stcg_shares
-    holding["ltcg_shares"] = total_qty - stcg_shares
-    holding["effective_tax_rate_pct"] = round(
-        effective_tax_rate(lots, price, as_of) * 100, 3) if price else 0.0
     holding["txn_cost_rate_pct"] = round(TXN_COST_SELL * 100, 4)
     holding["tax_source"] = tax_source
+    _refresh_derived_fields(holding, as_of)
+
+
+def apply_consumed_lots(holding: dict, consumed_by_lot_id: dict[str, int], as_of: date) -> None:
+    """Reduce tax_lots by shares a prior approved+sent plan already sold from
+    them, and refresh the derived fields to match. No-op if nothing of this
+    holding's lots has been consumed yet. Caller must own `holding` (not a
+    shared cached dict) since this mutates it."""
+    if not consumed_by_lot_id:
+        return
+    lots = holding.get("tax_lots") or []
+    if not any(l["lot_id"] in consumed_by_lot_id for l in lots):
+        return
+    new_lots = []
+    for lot in lots:
+        remaining = lot["quantity"] - consumed_by_lot_id.get(lot["lot_id"], 0)
+        if remaining > 0:
+            new_lots.append({**lot, "quantity": remaining})
+    holding["tax_lots"] = new_lots
+    _refresh_derived_fields(holding, as_of)
 
 
 def sale_tax_breakdown(holding: dict, sell_price: float, sell_shares: int,

@@ -70,8 +70,8 @@ const PRESETS = [
   { label: 'Increase IT + Healthcare ₹80 Cr', action: 'increase', targets: ['Information Technology', 'Healthcare'], amount_cr: 80 },
 ]
 
-const sevOf = (s) => (s === 'FAIL' || s === 'BREACH' || s === 'HIGH' ? 'error'
-  : s === 'WARN' || s === 'MEDIUM' ? 'warning' : 'success')
+const sevOf = (s) => (s === 'FAIL' || s === 'BREACH' || s === 'HIGH' || s === 'BLOCK' ? 'error'
+  : s === 'WARN' || s === 'MEDIUM' || s === 'ESCALATE' ? 'warning' : 'success')
 
 const fmtRet = (r) => (r == null ? '—' : `${(r * 100).toFixed(2)}%`)
 const formatShortDate = (value) => {
@@ -85,6 +85,7 @@ const RISK_LABELS = {
   timing: 'Market timing',
   lock_in: 'Lock-in constraints',
   plan_creation: 'Plan validation',
+  taxation: 'Tax impact',
 }
 const riskToneSx = (severity) => (theme) => {
   const dark = theme.palette.mode === 'dark'
@@ -161,6 +162,59 @@ function RiskRegister({ flags }) {
         )
       })}
     </Box>
+  )
+}
+
+function TaxImpactPanel({ policyChecks, heldDueToTax }) {
+  const taxChecks = policyChecks.filter((c) => c.code?.startsWith('TAX-'))
+  if (!taxChecks.length && !heldDueToTax.length) {
+    return <Typography color="text.secondary" variant="body2">No tax checks for this plan.</Typography>
+  }
+  return (
+    <>
+      {taxChecks.length > 0 && (
+        <Box sx={{ maxHeight: 220, overflowY: 'auto', mb: heldDueToTax.length ? 2 : 0 }}>
+          <Stack divider={<Divider flexItem />}>
+            {taxChecks.map((c, i) => (
+              <Stack key={i} direction={{ xs: 'column', sm: 'row' }} spacing={0.75}
+                alignItems={{ sm: 'center' }} justifyContent="space-between" sx={{ py: 1, gap: 1 }}>
+                <Box sx={{ minWidth: { sm: 110 }, flexShrink: 0 }}>
+                  <Typography variant="body2" fontWeight={700}>{c.code}</Typography>
+                  <Typography variant="caption" color="text.secondary">{c.entity}</Typography>
+                </Box>
+                <Typography variant="body2" color="text.secondary" sx={{ flex: 1, minWidth: 0 }}>
+                  {c.message}
+                </Typography>
+                <Chip size="small" label={c.status} color={sevOf(c.status)} variant="outlined" />
+              </Stack>
+            ))}
+          </Stack>
+        </Box>
+      )}
+      {heldDueToTax.length > 0 && (
+        <>
+          <Typography variant="subtitle2" gutterBottom>Held Due to Tax ({heldDueToTax.length})</Typography>
+          <ScrollX maxHeight={220}>
+            <Table size="small" stickyHeader>
+              <TableHead><TableRow>
+                <TableCell>Security</TableCell><TableCell align="right">Return</TableCell>
+                <TableCell align="right">Exit Cost</TableCell><TableCell>LTCG Turns</TableCell>
+              </TableRow></TableHead>
+              <TableBody>
+                {heldDueToTax.map((h, i) => (
+                  <TableRow key={i} hover>
+                    <TableCell sx={{ fontWeight: 600 }}>{h.ticker}</TableCell>
+                    <TableCell align="right" sx={{ color: 'error.main' }}>{fmtPct(h.expected_return_pct)}</TableCell>
+                    <TableCell align="right">{fmtPct(h.exit_cost_pct)}</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap' }}>{h.ltcg_maturity ? formatShortDate(h.ltcg_maturity) : '—'}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </ScrollX>
+        </>
+      )}
+    </>
   )
 }
 
@@ -597,7 +651,7 @@ export default function TradePlanner({ fundId }) {
               <Stat label="Buy / Sell" value={`${fmtCrValue(toCr(s.total_buy_value), 0)}`}
                 sub={`sell ${fmtCrValue(toCr(s.total_sell_value), 0)} · ${s.order_count} orders`} />
               <Stat label="Net Cash Impact" value={fmtCrValue(toCr(s.net_cash_impact), 0)}
-                sub={s.net_cash_impact < 0 ? 'cash deployed' : 'cash raised'}
+                sub={`${s.net_cash_impact < 0 ? 'cash deployed' : 'cash raised'} · ${fmtCrValue(toCr(s.net_cash_after_tax), 0)} after tax`}
                 color={s.net_cash_impact < 0 ? 'error.main' : 'success.main'} />
               <Stat label="Compliance" value={<Chip label={s.compliance_status} color={sevOf(s.compliance_status)} size="small" />}
                 sub={decision ? decision.status : plan.status} />
@@ -665,6 +719,23 @@ export default function TradePlanner({ fundId }) {
                       ))}
                     </TableBody>
                   </Table>
+                  {plan.cash_flow_planning.net_cash_after_tax != null && (
+                    <>
+                      <Divider sx={{ my: 1 }} />
+                      <Stack direction="row" alignItems="center" justifyContent="space-between">
+                        <Box>
+                          <Typography variant="body2" fontWeight={700}>Net cash after tax</Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            Post-trade: buy/sell value net of est. exit tax and buy-side STT/stamp duty
+                          </Typography>
+                        </Box>
+                        <Typography variant="body2" fontWeight={700}
+                          color={plan.cash_flow_planning.net_cash_after_tax < 0 ? 'error.main' : 'success.main'}>
+                          {fmtCrValue(toCr(plan.cash_flow_planning.net_cash_after_tax))}
+                        </Typography>
+                      </Stack>
+                    </>
+                  )}
                 </Panel>
 
                 <Panel title={`Pending / Unsettled (${plan.pending_trades.length})`}
@@ -699,9 +770,9 @@ export default function TradePlanner({ fundId }) {
               </Stack>
             </Box>
 
-            {/* Compliance & Risk — split two-up; needs the full width */}
-            <Panel title="Compliance Checks & Risk Flags">
-              <Box sx={{ display: 'grid', gap: 3, gridTemplateColumns: { xs: '1fr', md: '1.4fr 1fr' } }}>
+            {/* Compliance, Tax & Risk — three-up on wide screens */}
+            <Panel title="Compliance, Tax & Risk">
+              <Box sx={{ display: 'grid', gap: 3, gridTemplateColumns: { xs: '1fr', md: '1fr 1fr', xl: '1.1fr 1fr 1fr' } }}>
                 <Box>
                   <Typography variant="subtitle2" gutterBottom>Compliance</Typography>
                   {plan.compliance_checks.length === 0 ? <Typography color="text.secondary" variant="body2">No checks triggered.</Typography> : (
@@ -725,6 +796,11 @@ export default function TradePlanner({ fundId }) {
                       </Table>
                     </ScrollX>
                   )}
+                </Box>
+                <Box>
+                  <Typography variant="subtitle2" gutterBottom>Tax Impact</Typography>
+                  <TaxImpactPanel policyChecks={plan.policy_checks || []}
+                    heldDueToTax={plan.tax_summary?.held_due_to_tax || []} />
                 </Box>
                 <Box>
                   <Typography variant="subtitle2" gutterBottom>Execution Risk</Typography>

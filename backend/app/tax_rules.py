@@ -7,8 +7,15 @@ budget change is a config edit, not a code change:
   - STCG 20% on gains for lots held < 12 months
   - LTCG 12.5% on gains for lots held >= 12 months (Rs 1.25 lakh annual
     exemption, applied at plan level - it is negligible at crore scale)
-  - STT 0.1% of sell value on every delivery sell, plus brokerage/exchange
-    charges (~0.033%)
+  - Surcharge + cess on top of the base STCG/LTCG rates: surcharge on listed-
+    equity capital gains is capped at 15% regardless of income slab (Finance
+    Act 2022), plus a flat 4% health & education cess on (tax + surcharge).
+    STCG_RATE/LTCG_RATE below are this all-in effective rate, since that's
+    the rupee amount actually payable; STCG_STATUTORY_RATE/LTCG_STATUTORY_RATE
+    are the pre-surcharge statutory figures, kept for display.
+  - STT 0.1% of sell value on every delivery sell, and 0.1% of buy value on
+    every delivery buy, plus stamp duty on buys (0.015%) and brokerage/
+    exchange charges (~0.033%) on both sides
   - Loss lots contribute negative tax (losses offset gains), which is what
     makes tax-loss harvesting attractive to the optimizer.
 
@@ -32,9 +39,12 @@ _DEFAULT_RATES = {
     "financial_year": "2025-26",
     "stcg_rate_pct": 20.0,
     "ltcg_rate_pct": 12.5,
+    "surcharge_pct": 15.0,
+    "cess_pct": 4.0,
     "ltcg_exemption_inr": 125_000,
     "ltcg_holding_months": 12,
     "stt_sell_pct": 0.10,
+    "stt_buy_pct": 0.10,
     "stamp_duty_buy_pct": 0.015,
     "brokerage_pct": 0.03,
     "exchange_charges_pct": 0.00345,
@@ -56,15 +66,29 @@ def _load_rates() -> dict:
 
 RATES = _load_rates()
 
-STCG_RATE = RATES["stcg_rate_pct"] / 100
-LTCG_RATE = RATES["ltcg_rate_pct"] / 100
+STCG_STATUTORY_RATE = RATES["stcg_rate_pct"] / 100
+LTCG_STATUTORY_RATE = RATES["ltcg_rate_pct"] / 100
+# Surcharge on listed-equity STCG/LTCG is capped at 15% of the tax regardless
+# of the investor's income slab (Finance Act 2022); 4% cess applies on top of
+# (tax + surcharge) at every income level. This is the all-in multiplier on
+# the statutory rate that's actually payable.
+SURCHARGE_CESS_MULTIPLIER = (1 + RATES["surcharge_pct"] / 100) * (1 + RATES["cess_pct"] / 100)
+STCG_RATE = STCG_STATUTORY_RATE * SURCHARGE_CESS_MULTIPLIER
+LTCG_RATE = LTCG_STATUTORY_RATE * SURCHARGE_CESS_MULTIPLIER
+RATES["stcg_effective_rate_pct"] = round(STCG_RATE * 100, 3)
+RATES["ltcg_effective_rate_pct"] = round(LTCG_RATE * 100, 3)
 LTCG_EXEMPTION_INR = RATES["ltcg_exemption_inr"]
 LTCG_HOLDING_MONTHS = RATES["ltcg_holding_months"]
 STT_SELL = RATES["stt_sell_pct"] / 100
+STT_BUY = RATES["stt_buy_pct"] / 100
 STAMP_DUTY_BUY = RATES["stamp_duty_buy_pct"] / 100
 # Per-rupee friction on every sell regardless of gain/loss.
 TXN_COST_SELL = (RATES["stt_sell_pct"] + RATES["brokerage_pct"]
                  + RATES["exchange_charges_pct"]) / 100
+# Per-rupee friction on every buy: STT applies to delivery buys same as
+# sells, plus stamp duty (buy-side only) and brokerage/exchange charges.
+TXN_COST_BUY = (RATES["stt_buy_pct"] + RATES["stamp_duty_buy_pct"]
+                + RATES["brokerage_pct"] + RATES["exchange_charges_pct"]) / 100
 
 
 def months_between(start: date, end: date) -> int:
@@ -115,6 +139,25 @@ def compute_lot_tax(lot: dict, sell_price: float, sell_shares: int, as_of: date)
         "stt": stt,
         "txn_costs": txn,
         "total_tax": cgt + txn,
+    }
+
+
+def buy_txn_cost(buy_value: float) -> dict:
+    """STT + stamp duty + brokerage/exchange charges on a BUY order.
+
+    There is no CGT on a buy (gains aren't realized until a later sale), but
+    STT and stamp duty are real friction that applies regardless.
+    """
+    stt = buy_value * STT_BUY
+    stamp_duty = buy_value * STAMP_DUTY_BUY
+    brokerage_and_exchange = buy_value * (RATES["brokerage_pct"] + RATES["exchange_charges_pct"]) / 100
+    total_cost = stt + stamp_duty + brokerage_and_exchange
+    return {
+        "stt": round(stt, 2),
+        "stamp_duty": round(stamp_duty, 2),
+        "brokerage_and_exchange": round(brokerage_and_exchange, 2),
+        "total_cost": round(total_cost, 2),
+        "rate_pct": round(TXN_COST_BUY * 100, 4),
     }
 
 

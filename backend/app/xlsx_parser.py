@@ -195,6 +195,12 @@ def parse_sbi_nifty50_etf(xlsx_path: str | Path) -> list[dict]:
     """
     Parse SBI Nifty 50 ETF disclosure.
     Uses a flexible approach to extract holding data from XLSX files.
+
+    Each data row carries a leading numeric scrip/serial code before the
+    name/ISIN (e.g. "100006"), unlike the other funds' disclosures. The
+    numeric-value scan below only looks after the ISIN column so that code
+    isn't mistaken for quantity, shifting quantity/market-value/%NAV each
+    one column left.
     """
     rows = _parse_xlsx_sheet(xlsx_path, 0)
     holdings = []
@@ -265,9 +271,13 @@ def parse_sbi_nifty50_etf(xlsx_path: str | Path) -> list[dict]:
                     industry = cell_val
                     break
 
-        # Look for numeric values (quantity, market value, %NAV)
+        # Look for numeric values (quantity, market value, %NAV). Only scan
+        # cells after the ISIN column — see the leading scrip-code note in
+        # this function's docstring.
         numeric_cells = []
         for i, cell in enumerate(row_data):
+            if i <= isin_pos:
+                continue
             if cell is not None:
                 cell_str = str(cell).strip()
                 try:

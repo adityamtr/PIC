@@ -604,7 +604,23 @@ DEFAULT_FUND_ID_V2 = "HDFC-FLEXICAP-DG"
 # has run). Only when the DB is unavailable/empty do we fall back to building
 # from the raw files, so a fresh checkout still works before the first seed.
 _DB_FUNDS = db.list_fund_datasets()
-FUNDS_V2 = _DB_FUNDS if _DB_FUNDS else build_datasets_from_source()
+# Fallback cache built from source XLSX if DB unavailable (for fresh checkouts)
+_SOURCE_FUNDS = None
+
+
+def _get_funds():
+    """Load all fund datasets from the database, or fall back to source build."""
+    db_funds = db.list_fund_datasets()
+    if db_funds:
+        return db_funds
+    global _SOURCE_FUNDS
+    if _SOURCE_FUNDS is None:
+        _SOURCE_FUNDS = build_datasets_from_source()
+    return _SOURCE_FUNDS
+
+
+# For backwards compatibility, expose FUNDS_V2 (though it should not be mutated)
+FUNDS_V2 = _DB_FUNDS if _DB_FUNDS else (_SOURCE_FUNDS or build_datasets_from_source())
 
 
 # --------------------------------------------------------------------------- #
@@ -612,6 +628,7 @@ FUNDS_V2 = _DB_FUNDS if _DB_FUNDS else build_datasets_from_source()
 # --------------------------------------------------------------------------- #
 def list_funds():
     """Return list of funds."""
+    funds = _get_funds()
     return [
         {
             "fund_id": ds["id"],
@@ -619,13 +636,19 @@ def list_funds():
             "category": ds["fund"]["category"],
             "amc": ds["fund"]["amc"],
         }
-        for ds in FUNDS_V2.values()
+        for ds in (funds or FUNDS_V2).values()
     ]
 
 
 def get_ds(fund_id: str | None) -> dict:
-    """Get dataset by fund_id."""
-    return FUNDS_V2.get(fund_id or DEFAULT_FUND_ID_V2, FUNDS_V2[DEFAULT_FUND_ID_V2])
+    """Get dataset by fund_id. Reads straight from the DB on every call (one row,
+    not the whole table) so a reseeded DB is reflected without a server restart."""
+    key = fund_id or DEFAULT_FUND_ID_V2
+    ds = db.get_fund_dataset(key)
+    if ds:
+        return ds
+    funds = _get_funds() or FUNDS_V2
+    return funds.get(key, funds[DEFAULT_FUND_ID_V2])
 
 
 def sector_weight(ds, sector):
