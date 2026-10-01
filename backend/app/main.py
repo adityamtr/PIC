@@ -47,7 +47,18 @@ def _to_cr(value):
 
 
 def _ds(fund_id):
-    return data_v2.get_ds(fund_id)
+    """Load fund dataset, augmented with approved-plan orders as pending trades
+    so all endpoints see the full cross-plan commitment picture. Returns a
+    shallow copy to avoid mutating the cached dataset."""
+    ds = data_v2.get_ds(fund_id)
+    # Create a new pending_trades list (don't mutate the cached one) by combining
+    # static trades + approved-plan orders.
+    augmented_ds = dict(ds)
+    augmented_ds["pending_trades"] = (
+        list(ds["pending_trades"]) +
+        planner._augment_pending_trades_from_approved_plans(fund_id)
+    )
+    return augmented_ds
 
 
 @app.get("/api/health")

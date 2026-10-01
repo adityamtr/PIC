@@ -214,7 +214,13 @@ def save_plan(plan: dict) -> bool:
     fund = plan.get("fund", {})
     try:
         with _LOCK, connect() as conn:
-            conn.execute("DELETE FROM plans WHERE plan_id = ?", (plan["plan_id"],))
+            # Delete all related rows first (explicit, to avoid cascade issues)
+            plan_id = plan["plan_id"]
+            conn.execute("DELETE FROM plan_orders WHERE plan_id = ?", (plan_id,))
+            conn.execute("DELETE FROM plan_funding_sources WHERE plan_id = ?", (plan_id,))
+            conn.execute("DELETE FROM plan_compliance_checks WHERE plan_id = ?", (plan_id,))
+            conn.execute("DELETE FROM plan_risk_flags WHERE plan_id = ?", (plan_id,))
+            conn.execute("DELETE FROM plans WHERE plan_id = ?", (plan_id,))
             conn.execute(
                 "INSERT INTO plans (plan_id, fund_id, fund_name, created_at, status, action, "
                 "target, amount_cr, horizon_days, trade_date, settlement_date, allocation_method, "
