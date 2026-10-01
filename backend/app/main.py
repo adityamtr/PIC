@@ -11,11 +11,15 @@ the default fund is used.
 
 from __future__ import annotations
 
+import asyncio
+import json
+import random
 from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from sse_starlette.sse import EventSourceResponse
 
 from . import data_v2, db, email_draft, forecast, planner
 from .schemas import (
@@ -197,6 +201,43 @@ def create_trade_plan(req: IntentRequest, fund_id: str | None = Query(None)):
     _PLANS[plan["plan_id"]] = plan   # in-memory cache (fallback when DB is absent)
     db.save_plan(plan)               # persist to SQLite (no-op if DB unavailable)
     return plan
+
+
+# Each granular step is real backend work, but generation is sub-second, so we
+# linger on every emitted step for a randomised 1-3s. This keeps each real
+# output readable and gives the stream a natural, non-mechanical cadence.
+_STEP_DWELL_MIN_SECONDS = 0.5
+_STEP_DWELL_MAX_SECONDS = 1.0
+
+
+@app.post("/api/trade-plan/stream")
+async def create_trade_plan_stream(req: IntentRequest, fund_id: str | None = Query(None)):
+    """Generate a plan, streaming real per-phase progress as Server-Sent Events.
+
+    Emits a ``progress`` event as each planning phase actually completes (with
+    real computed values), then a final ``plan`` event carrying the full plan.
+    Errors surface as an ``error`` event instead of a 500 so the UI can react.
+    """
+    intent = req.model_dump(exclude={"fund_id"})
+    resolved_fund = fund_id or req.fund_id
+
+    async def event_source():
+        try:
+            for event in planner.iter_plan_steps(resolved_fund, intent):
+                if event.get("type") == "plan":
+                    plan = event["plan"]
+                    _PLANS[plan["plan_id"]] = plan   # in-memory cache
+                    db.save_plan(plan)               # persist (no-op if DB unavailable)
+                    yield {"event": "plan", "data": json.dumps(plan)}
+                else:
+                    yield {"event": "progress", "data": json.dumps(event)}
+                    # Let the completed step stay on screen for a random beat.
+                    await asyncio.sleep(random.uniform(
+                        _STEP_DWELL_MIN_SECONDS, _STEP_DWELL_MAX_SECONDS))
+        except Exception as exc:  # surface failures to the client stream
+            yield {"event": "error", "data": json.dumps({"message": str(exc)})}
+
+    return EventSourceResponse(event_source())
 
 
 @app.get("/api/trade-plans")

@@ -19,7 +19,6 @@ import PlanGenerationProgress from './PlanGenerationProgress'
 const toCr = (r) => r / 1e7
 const STEPS = ['PM Intent', 'Cash-Flow Planning', 'Trade Plan', 'Compliance & Risk', 'PIC Review']
 const MAX_SETTLEMENT_DAYS = 33
-const MIN_GENERATION_DELAY_MS = 15_000
 const dateString = (date) => {
   const year = date.getFullYear()
   const month = String(date.getMonth() + 1).padStart(2, '0')
@@ -293,7 +292,7 @@ export default function TradePlanner({ fundId }) {
   const [method, setMethod] = useState('optimize')
   const [plan, setPlan] = useState(null)
   const [busy, setBusy] = useState(false)
-  const [generationElapsed, setGenerationElapsed] = useState(0)
+  const [progressEvents, setProgressEvents] = useState([])
   const [error, setError] = useState(null)
   const [validationWarning, setValidationWarning] = useState('')
   const [decision, setDecision] = useState(null)
@@ -332,20 +331,6 @@ export default function TradePlanner({ fundId }) {
     api.holdings(fundId).then((d) => setHoldings(d.holdings)).catch(() => setHoldings([]))
   }, [fundId])
 
-  useEffect(() => {
-    if (!busy) {
-      setGenerationElapsed(0)
-      return undefined
-    }
-
-    const startedAt = Date.now()
-    const timer = window.setInterval(() => {
-      setGenerationElapsed(Math.min(15, Math.floor((Date.now() - startedAt) / 1000)))
-    }, 250)
-
-    return () => window.clearInterval(timer)
-  }, [busy])
-
   // Keep the selected sectors valid for the current action / fund.
   useEffect(() => {
     if (!cfg.needsTarget) return
@@ -380,8 +365,7 @@ export default function TradePlanner({ fundId }) {
       return
     }
     setValidationWarning('')
-    setBusy(true); setError(null); setDecision(null); setPlan(null)
-    const minimumDelay = new Promise((resolve) => window.setTimeout(resolve, MIN_GENERATION_DELAY_MS))
+    setBusy(true); setError(null); setDecision(null); setPlan(null); setProgressEvents([])
     try {
       const payload = {
         action,
@@ -395,11 +379,11 @@ export default function TradePlanner({ fundId }) {
         method,
         fund_id: fundId,
       }
-      const generatedPlan = await api.createTradePlan(payload)
-      await minimumDelay
+      const generatedPlan = await api.createTradePlanStream(payload, {
+        onProgress: (evt) => setProgressEvents((prev) => [...prev, evt]),
+      })
       setPlan(generatedPlan)
     } catch (e) {
-      await minimumDelay
       setError(e.message)
     } finally { setBusy(false) }
   }
@@ -412,7 +396,8 @@ export default function TradePlanner({ fundId }) {
   }
 
   const s = plan?.summary
-  const activeStep = plan ? 4 : busy ? Math.min(4, Math.floor(generationElapsed / 3)) : 0
+  const activePhaseIndex = progressEvents.length ? progressEvents[progressEvents.length - 1].index : 0
+  const activeStep = plan ? 4 : busy ? Math.min(4, activePhaseIndex) : 0
   const orderTickers = new Set((plan?.orders || []).map((o) => o.ticker))
   const opt = plan?.optimization
 
@@ -600,7 +585,7 @@ export default function TradePlanner({ fundId }) {
       {validationWarning && <Alert severity="warning">{validationWarning}</Alert>}
       {error && <Alert severity="error">{error} — is the backend running on :8000?</Alert>}
 
-      {busy && <PlanGenerationProgress elapsedSeconds={generationElapsed} />}
+      {busy && <PlanGenerationProgress events={progressEvents} />}
 
       {plan && (
         <Grow in timeout={450}>
