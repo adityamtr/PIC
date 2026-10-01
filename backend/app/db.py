@@ -324,6 +324,64 @@ def list_plans(fund_id: str | None = None) -> list[dict] | None:
     return plans
 
 
+def _ensure_sent_emails_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sent_emails ("
+        "email_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, subject TEXT NOT NULL, "
+        "body TEXT NOT NULL, model TEXT NOT NULL, sent_at TEXT NOT NULL, "
+        "FOREIGN KEY (plan_id) REFERENCES plans(plan_id) ON DELETE CASCADE)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sent_emails_plan_sent "
+        "ON sent_emails(plan_id, sent_at DESC)"
+    )
+    legacy_table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'email_drafts'"
+    ).fetchone()
+    if legacy_table:
+        conn.execute(
+            "INSERT OR IGNORE INTO sent_emails "
+            "(email_id, plan_id, subject, body, model, sent_at) "
+            "SELECT draft_id, plan_id, subject, body, model, updated_at FROM email_drafts"
+        )
+
+
+def create_sent_email(email: dict[str, str]) -> dict[str, str] | None:
+    """Store an email explicitly marked sent and return it, or None if unavailable."""
+    if not available():
+        return None
+    try:
+        with _LOCK, connect() as conn:
+            _ensure_sent_emails_table(conn)
+            conn.execute(
+                "INSERT INTO sent_emails "
+                "(email_id, plan_id, subject, body, model, sent_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (email["email_id"], email["plan_id"], email["subject"], email["body"],
+                 email["model"], email["sent_at"]),
+            )
+    except sqlite3.Error:
+        return None
+    return email
+
+
+def list_sent_emails(plan_id: str) -> list[dict[str, str]] | None:
+    """Return sent emails for one plan, newest first, or None if unavailable."""
+    if not available():
+        return None
+    try:
+        with connect() as conn:
+            _ensure_sent_emails_table(conn)
+            rows = conn.execute(
+                "SELECT email_id, plan_id, subject, body, model, sent_at "
+                "FROM sent_emails WHERE plan_id = ? ORDER BY sent_at DESC, email_id DESC",
+                (plan_id,),
+            ).fetchall()
+    except sqlite3.Error:
+        return None
+    return [dict(row) for row in rows]
+
+
 def save_decision(plan_id: str, status: str, decision: dict) -> bool:
     """Record a PIC decision: append to ``plan_decisions`` and update the plan's
     status + embedded decision in ``plan_json``. Returns ``False`` if unavailable

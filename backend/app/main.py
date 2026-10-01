@@ -12,12 +12,16 @@ the default fund is used.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import data_v2, db, email_draft, forecast, planner
-from .schemas import DecisionRequest, DecisionResponse, EmailDraftResponse, IntentRequest
+from .schemas import (
+    DecisionRequest, DecisionResponse, EmailDraftResponse, IntentRequest,
+    SendEmailRequest, SentEmailResponse,
+)
 
 app = FastAPI(
     title="PIC Trade-Plan API",
@@ -231,6 +235,37 @@ def generate_trade_plan_email(plan_id: str):
     except email_draft.EmailDraftGenerationError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return EmailDraftResponse(plan_id=plan_id, **draft)
+
+
+@app.post("/api/trade-plan/{plan_id}/emails/send", response_model=SentEmailResponse)
+def send_trade_plan_email(plan_id: str, content: SendEmailRequest):
+    plan = _load_plan(plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    decision = (plan.get("decision") or {}).get("decision")
+    is_approved = decision == "Approve" if decision else str(plan.get("status", "")).lower().startswith("approved")
+    if not is_approved:
+        raise HTTPException(status_code=409, detail="Emails can be sent only for approved plans")
+    sent_at = datetime.now(timezone.utc).isoformat()
+    sent_email = db.create_sent_email({
+        "plan_id": plan_id,
+        "email_id": str(uuid4()),
+        **content.model_dump(),
+        "sent_at": sent_at,
+    })
+    if sent_email is None:
+        raise HTTPException(status_code=503, detail="Sent email storage is unavailable")
+    return SentEmailResponse(**sent_email)
+
+
+@app.get("/api/trade-plan/{plan_id}/emails")
+def list_trade_plan_sent_emails(plan_id: str):
+    if not _load_plan(plan_id):
+        raise HTTPException(status_code=404, detail="Plan not found")
+    emails = db.list_sent_emails(plan_id)
+    if emails is None:
+        raise HTTPException(status_code=503, detail="Sent email storage is unavailable")
+    return {"plan_id": plan_id, "emails": emails}
 
 
 @app.post("/api/trade-plan/{plan_id}/decision", response_model=DecisionResponse)
