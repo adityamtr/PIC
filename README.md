@@ -1,6 +1,6 @@
 # PIC Trade-Plan Studio
 
-A working demo of the **Portfolio Implementation & Control (PIC)** automation 
+A working demo of the **Portfolio Implementation & Control (PIC)** automation
 concept ("WealthVector") — the intelligent **middle layer** that turns a Portfolio
 Manager's investment intent into a review-ready **trading plan** in minutes
 instead of hours.
