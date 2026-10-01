@@ -66,7 +66,7 @@ if str(BACKEND_DIR) not in sys.path:
 # --------------------------------------------------------------------------- #
 # Ordered list so --reset can drop children before parents.
 TABLES = [
-    "plan_decisions", "plan_risk_flags", "plan_compliance_checks",
+    "sent_emails", "email_drafts", "plan_decisions", "plan_risk_flags", "plan_compliance_checks",
     "plan_funding_sources", "plan_orders", "plans",
     "tax_rules", "esg_exclusions", "policy_thresholds",
     "compliance_rules", "fund_compliance_limits",
@@ -311,6 +311,18 @@ CREATE TABLE IF NOT EXISTS plans (
 CREATE INDEX IF NOT EXISTS idx_plans_fund ON plans(fund_id);
 CREATE INDEX IF NOT EXISTS idx_plans_status ON plans(status);
 CREATE INDEX IF NOT EXISTS idx_plans_created ON plans(created_at);
+
+CREATE TABLE IF NOT EXISTS sent_emails (
+    email_id   TEXT PRIMARY KEY,
+    plan_id    TEXT NOT NULL,
+    subject    TEXT NOT NULL,
+    body       TEXT NOT NULL,
+    model      TEXT NOT NULL,
+    sent_at    TEXT NOT NULL,
+    FOREIGN KEY (plan_id) REFERENCES plans(plan_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_sent_emails_plan_sent
+    ON sent_emails(plan_id, sent_at DESC);
 
 CREATE TABLE IF NOT EXISTS plan_orders (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,

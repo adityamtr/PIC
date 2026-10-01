@@ -164,6 +164,9 @@ def attribute_sale(lots: list[dict], sell_price: float, sell_shares: int,
         take = min(remaining, lot["quantity"])
         if take <= 0:
             continue
+        acq = lot["acquisition_date"]
+        if isinstance(acq, str):
+            acq = date.fromisoformat(acq)
         d = compute_lot_tax(lot, sell_price, take, as_of)
         if d["term"] == "LTCG":
             ltcg_gain += d["gain"]
@@ -173,6 +176,7 @@ def attribute_sale(lots: list[dict], sell_price: float, sell_shares: int,
         txn += d["txn_costs"]
         consumed.append({
             "lot_id": lot.get("lot_id"),
+            "acquisition_date": acq.isoformat(),
             "shares": take,
             "term": d["term"],
             "gain": round(d["gain"], 2),
