@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { Box, CircularProgress, Fade, LinearProgress, Stack, Typography } from '@mui/material'
 import AccountBalanceWalletOutlinedIcon from '@mui/icons-material/AccountBalanceWalletOutlined'
 import AutoGraphOutlinedIcon from '@mui/icons-material/AutoGraphOutlined'
@@ -6,53 +7,19 @@ import FactCheckOutlinedIcon from '@mui/icons-material/FactCheckOutlined'
 import ShieldOutlinedIcon from '@mui/icons-material/ShieldOutlined'
 import { Panel } from './ui'
 
+// Stage metadata, keyed by the backend `phase` id emitted over SSE. Each phase
+// streams several granular steps (real order counts, investable cash, tax drag,
+// compliance tallies); these titles/icons are just the frame around them.
 const STAGES = [
-  {
-    title: 'Validating portfolio manager intent',
-    steps: [
-      'Parsing the action, amount, target sectors, and allocation method.',
-      'Resolving selected sector names against the supported universe.',
-      'Checking the amount and trade-to-settlement horizon.',
-    ],
-    icon: FactCheckOutlinedIcon,
-  },
-  {
-    title: 'Reviewing available cash flow',
-    steps: [
-      'Loading fund cash, reserve buffer, and unsettled trade impact.',
-      'Adding expected dividends and net subscription or redemption flows.',
-      'Deducting accrued expenses to calculate investable cash.',
-    ],
-    icon: AccountBalanceWalletOutlinedIcon,
-  },
-  {
-    title: 'Constructing the trade allocation',
-    steps: [
-      'Generating one-month return forecasts for holdings and the universe.',
-      'Running the manual, rules-based, or convex-optimization allocation path.',
-      'Sizing share-level orders and assigning eligible NSE/BSE trade dates.',
-    ],
-    icon: AutoGraphOutlinedIcon,
-  },
-  {
-    title: 'Running compliance and risk checks',
-    steps: [
-      'Calculating sell-side tax lots and tax drag.',
-      'Reprojecting issuer, sector, and group concentration after trades.',
-      'Evaluating liquidity, lock-ins, events, and policy controls.',
-    ],
-    icon: ShieldOutlinedIcon,
-  },
-  {
-    title: 'Preparing the PIC review package',
-    steps: [
-      'Compiling cash impact, orders, compliance results, and risk flags.',
-      'Selecting the recommendation from pass, warn, block, or escalation outcomes.',
-      'Creating the plan in Pending PIC Review for human decision.',
-    ],
-    icon: FactCheckOutlinedIcon,
-  },
+  { phase: 'intent', title: 'Validating portfolio manager intent', icon: FactCheckOutlinedIcon },
+  { phase: 'cash_flow', title: 'Reviewing available cash flow', icon: AccountBalanceWalletOutlinedIcon },
+  { phase: 'allocation', title: 'Constructing the trade allocation', icon: AutoGraphOutlinedIcon },
+  { phase: 'compliance_risk', title: 'Running compliance and risk checks', icon: ShieldOutlinedIcon },
+  { phase: 'package', title: 'Preparing the PIC review package', icon: FactCheckOutlinedIcon },
 ]
+
+// Professional rotating verbs for the global generating indicator.
+const STATUS_WORDS = ['Analyzing', 'Computing', 'Optimizing', 'Reconciling', 'Evaluating', 'Synthesizing', 'Finalizing']
 
 function CompletedStageIcon() {
   return (
@@ -65,22 +32,65 @@ function CompletedStageIcon() {
 }
 
 function ActiveStageIcon() {
+  return <CircularProgress size={20} thickness={5} sx={{ color: 'inherit' }} />
+}
+
+function RotatingStatusWord() {
+  const [i, setI] = useState(0)
+  useEffect(() => {
+    const t = window.setInterval(() => setI((prev) => (prev + 1) % STATUS_WORDS.length), 1400)
+    return () => window.clearInterval(t)
+  }, [])
   return (
-    <CircularProgress size={20} thickness={5} sx={{ color: 'inherit' }} />
+    <Fade key={STATUS_WORDS[i]} in timeout={400}>
+      <Typography component="span" variant="overline"
+        sx={{ fontWeight: 800, letterSpacing: 0.8, color: 'primary.main' }}>
+        {STATUS_WORDS[i]}…
+      </Typography>
+    </Fade>
   )
 }
 
-export default function PlanGenerationProgress({ elapsedSeconds }) {
-  const progress = Math.min(100, Math.round((elapsedSeconds / 15) * 100))
-  const activeStageIndex = Math.min(STAGES.length - 1, Math.floor(elapsedSeconds / 3))
+// One granular step line (label + its real output detail).
+function StepLine({ label, detail }) {
+  return (
+    <Fade in timeout={350}>
+      <Box sx={{ mt: 0.5 }}>
+        <Typography variant="caption" sx={{ display: 'block', fontWeight: 700, lineHeight: 1.4 }}>
+          {label}
+        </Typography>
+        {detail ? (
+          <Typography variant="caption" color="text.secondary"
+            sx={{ display: 'block', lineHeight: 1.4, fontVariantNumeric: 'tabular-nums' }}>
+            {detail}
+          </Typography>
+        ) : null}
+      </Box>
+    </Fade>
+  )
+}
+
+// `events` is the list of real granular progress events received so far, each
+// shaped { phase, index, total, step, label, detail, data }.
+export default function PlanGenerationProgress({ events = [] }) {
+  const total = events[0]?.total || STAGES.length
+  const activePhaseIndex = events.length ? events[events.length - 1].index : 0
+  const progress = Math.round((activePhaseIndex / total) * 100)
+
+  const stepsByPhase = new Map()
+  for (const e of events) {
+    if (!stepsByPhase.has(e.phase)) stepsByPhase.set(e.phase, [])
+    stepsByPhase.get(e.phase).push(e)
+  }
 
   return (
     <Panel highlight bodySx={{ py: 3 }}>
       <Box aria-live="polite" aria-busy="true">
         <Box>
-          <Typography variant="overline" color="primary" sx={{ fontWeight: 800, letterSpacing: 0.8 }}>
-            Plan generation in progress
-          </Typography>
+          <Stack direction="row" alignItems="center" spacing={1}>
+            <CircularProgress size={16} thickness={5} />
+            <RotatingStatusWord />
+          </Stack>
           <Typography variant="subtitle1" sx={{ fontWeight: 700, mt: 0.25 }}>
             Building a decision-ready trade plan
           </Typography>
@@ -107,16 +117,13 @@ export default function PlanGenerationProgress({ elapsedSeconds }) {
 
         <Stack spacing={0} sx={{ mt: 2.5 }}>
           {STAGES.map((stage, index) => {
-            const completeAt = (index + 1) * 3
-            const complete = elapsedSeconds >= completeAt
-            const active = !complete && index === activeStageIndex
+            const steps = stepsByPhase.get(stage.phase) || []
+            const complete = index < activePhaseIndex
+            const active = index === activePhaseIndex
             const Icon = stage.icon
-            const visibleStepCount = complete
-              ? stage.steps.length
-              : active ? Math.min(stage.steps.length, elapsedSeconds - index * 3 + 1) : 0
 
             return (
-              <Stack key={stage.title} direction="row" spacing={1.5} alignItems="flex-start"
+              <Stack key={stage.phase} direction="row" spacing={1.5} alignItems="flex-start"
                 sx={{ py: 1.25, opacity: complete || active ? 1 : 0.42 }}>
                 <Box sx={{ width: 30, height: 30, borderRadius: '50%', display: 'grid', placeItems: 'center', flexShrink: 0,
                   bgcolor: complete ? 'primary.main' : active ? 'action.selected' : 'action.hover',
@@ -124,17 +131,14 @@ export default function PlanGenerationProgress({ elapsedSeconds }) {
                   border: 1, borderColor: complete || active ? 'primary.main' : 'divider' }}>
                   {complete ? <CompletedStageIcon /> : active ? <ActiveStageIcon /> : <Icon fontSize="small" />}
                 </Box>
-                <Box sx={{ minWidth: 0, pt: 0.25 }}>
+                <Box sx={{ minWidth: 0, pt: 0.25, flex: 1 }}>
                   <Typography variant="body2" fontWeight={active ? 800 : 700}>{stage.title}</Typography>
-                  <Stack spacing={0.35} sx={{ mt: 0.5 }}>
-                    {stage.steps.slice(0, visibleStepCount).map((step) => (
-                      <Fade key={step} in timeout={350}>
-                        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', lineHeight: 1.45 }}>
-                          {step}
-                        </Typography>
-                      </Fade>
-                    ))}
-                  </Stack>
+                  {steps.map((s) => <StepLine key={s.step} label={s.label} detail={s.detail} />)}
+                  {active && steps.length === 0 ? (
+                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+                      Working…
+                    </Typography>
+                  ) : null}
                 </Box>
               </Stack>
             )

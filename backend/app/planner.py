@@ -740,7 +740,40 @@ def _tax_context(ds, orders, returns, action, horizon_days, as_of):
 # --------------------------------------------------------------------------- #
 # Public entry point
 # --------------------------------------------------------------------------- #
+def _cr(amount):
+    """Rupees -> crore, rounded for display in progress details."""
+    return round((amount or 0) / CRORE, 2)
+
+
+def _step(phase, phase_index, step, label, detail, data=None):
+    """Build one granular progress event belonging to a phase."""
+    return {
+        "type": "progress", "phase": phase, "index": phase_index, "total": 5,
+        "step": step, "label": label, "detail": detail, "data": data or {},
+    }
+
+
 def generate_plan(fund_id, intent):
+    """Build a plan and return the final dict.
+
+    Thin wrapper that drains :func:`iter_plan_steps` for callers that only need
+    the finished plan (the plain POST endpoint and the test matrix).
+    """
+    plan = None
+    for event in iter_plan_steps(fund_id, intent):
+        if event.get("type") == "plan":
+            plan = event["plan"]
+    return plan
+
+
+def iter_plan_steps(fund_id, intent):
+    """Generate a plan, yielding real progress events at each phase boundary.
+
+    Yields ``{"type": "progress", ...}`` dicts as each phase actually completes
+    (carrying real computed values, not canned text) and finally a single
+    ``{"type": "plan", "plan": <plan dict>}``. The SSE endpoint streams these;
+    :func:`generate_plan` drains them for non-streaming callers.
+    """
     ds = _get_ds(fund_id)
     action = (intent.get("action") or "contribution").lower()
     target = intent.get("target") or ""
@@ -764,6 +797,18 @@ def generate_plan(fund_id, intent):
         s = resolve_sector(t)
         if s and s not in sectors:
             sectors.append(s)
+    yield _step("intent", 0, "intent:parse", "Parsed portfolio manager intent",
+                f"Action {action} · ₹{intent.get('amount_cr') or 0} cr · "
+                f"method {(intent.get('method') or 'optimize')}",
+                {"action": action, "amount_cr": intent.get("amount_cr"),
+                 "method": intent.get("method") or "optimize"})
+    yield _step("intent", 0, "intent:sectors", "Resolved target sectors",
+                (", ".join(sectors) if sectors else "Portfolio-level — no sector target"),
+                {"resolved_sectors": sectors})
+    yield _step("intent", 0, "intent:horizon", "Checked settlement horizon",
+                f"{horizon} day(s) trade → settlement",
+                {"horizon_days": horizon, "trade_date": trade_date,
+                 "settlement_date": settlement_date})
     cfp = cash_flow_planning(ds, horizon)
     # A contribution brings new subscription cash into the fund. Reflect it in
     # the investable balance so the plan can deploy it and the cash-deployment
@@ -773,6 +818,21 @@ def generate_plan(fund_id, intent):
         cfp["investable_amount"] = cfp["investable_amount"] + amount
         cfp["line_items"].append({"label": "New subscription (this plan)", "amount": amount})
     investable = cfp["investable_amount"]
+    yield _step("cash_flow", 1, "cash_flow:onhand", "Loaded cash and reserve buffer",
+                f"Cash ₹{_cr(cfp['total_cash'])} cr · reserves ₹{_cr(cfp['reserves'])} cr",
+                {"total_cash_cr": _cr(cfp["total_cash"]), "reserves_cr": _cr(cfp["reserves"])})
+    yield _step("cash_flow", 1, "cash_flow:flows", "Applied pending flows and dividends",
+                f"Pending net ₹{_cr(cfp['pending_settlement_net'])} cr · "
+                f"dividends ₹{_cr(cfp['expected_dividends'])} cr",
+                {"pending_net_cr": _cr(cfp["pending_settlement_net"]),
+                 "dividends_cr": _cr(cfp["expected_dividends"])})
+    yield _step("cash_flow", 1, "cash_flow:expenses", "Deducted accrued expenses and net flows",
+                f"Expenses ₹{_cr(cfp['expected_expenses'])} cr · "
+                f"net sub/red ₹{_cr(cfp['estimated_subscriptions'] + cfp['estimated_redemptions'])} cr",
+                {"expenses_cr": _cr(cfp["expected_expenses"])})
+    yield _step("cash_flow", 1, "cash_flow:investable", "Calculated investable cash",
+                f"Investable ₹{_cr(investable)} cr",
+                {"investable_cr": _cr(investable), "line_items": cfp.get("line_items")})
 
     # Forecast expected 1-month returns (TFT placeholder). Used by the convex
     # optimizer and shown in the plan regardless of method.
@@ -849,6 +909,19 @@ def generate_plan(fund_id, intent):
         if settlement_date:
             o["settlement_date"] = settlement_date
 
+    buy_ct = sum(1 for o in orders if o["side"] == "BUY")
+    sell_ct = sum(1 for o in orders if o["side"] == "SELL")
+    yield _step("allocation", 2, "allocation:forecast", "Generated 1-month return forecasts",
+                f"{len(returns)} tickers forecast",
+                {"forecast_count": len(returns)})
+    yield _step("allocation", 2, "allocation:method", "Ran the allocation engine",
+                (f"{method_used}" + (f" · solver {opt_meta['solver']} ({opt_meta['status']})"
+                                     if opt_meta else "")),
+                {"method": method_used, "optimization": opt_meta})
+    yield _step("allocation", 2, "allocation:orders", "Sized share-level orders",
+                f"{len(orders)} order(s) · {buy_ct} buy / {sell_ct} sell",
+                {"order_count": len(orders), "buy_count": buy_ct, "sell_count": sell_ct})
+
     # Attach the per-order tax breakdown (STCG/LTCG/STT over the synthetic
     # lots, consumed least-tax-first) to every SELL, whatever the method.
     as_of = date.today()
@@ -872,6 +945,23 @@ def generate_plan(fund_id, intent):
     policy_result = policy.evaluate(ds, orders, cfp, horizon, tax_context=tax_context)
     risks.extend(policy_result["risk_flags"])
     warnings.extend(policy_result["warnings"])
+    _fail_ct = sum(1 for c in compliance if c["status"] == "FAIL")
+    _warn_ct = sum(1 for c in compliance if c["status"] == "WARN")
+    _high_risk_ct = sum(1 for r in risks if r.get("severity") == "HIGH")
+    yield _step("compliance_risk", 3, "compliance_risk:tax", "Calculated tax lots and drag",
+                f"Est. tax ₹{_cr(tax_context['est_total_tax'])} cr · "
+                f"drag {tax_context['tax_drag_bps']} bps",
+                {"est_total_tax_cr": _cr(tax_context["est_total_tax"]),
+                 "tax_drag_bps": tax_context["tax_drag_bps"]})
+    yield _step("compliance_risk", 3, "compliance_risk:concentration",
+                "Reprojected concentration limits",
+                f"{len(compliance)} check(s) · {_fail_ct} fail · {_warn_ct} warn",
+                {"compliance_fail": _fail_ct, "compliance_warn": _warn_ct,
+                 "checks": compliance})
+    yield _step("compliance_risk", 3, "compliance_risk:policy",
+                "Evaluated liquidity, lock-ins, and policy",
+                f"{_high_risk_ct} high-risk flag(s) · policy {policy_result['status']}",
+                {"high_risk_flags": _high_risk_ct, "policy_status": policy_result["status"]})
 
     total_buy = sum(o["est_value"] for o in orders if o["side"] == "BUY")
     total_sell = sum(o["est_value"] for o in orders if o["side"] == "SELL")
@@ -896,7 +986,7 @@ def generate_plan(fund_id, intent):
     pending = [{**t, "gross_value_cr": round(t["gross_value"] / CRORE, 2),
                 "cash_impact_cr": round(t["cash_impact"] / CRORE, 2)} for t in ds["pending_trades"]]
 
-    return {
+    plan = {
         "plan_id": f"PLAN-{uuid.uuid4().hex[:8].upper()}",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "fund": {"fund_id": ds["id"], "name": ds["fund"]["name"], "aum_cr": round(ds["aum"] / CRORE, 2)},
@@ -943,3 +1033,14 @@ def generate_plan(fund_id, intent):
         "execution_allowed": policy_result["execution_allowed"] and not has_fail,
         "warnings": warnings, "recommendation": recommendation, "status": "Pending PIC Review",
     }
+    yield _step("package", 4, "package:cash", "Compiled net cash impact",
+                f"Net cash ₹{_cr(net_cash)} cr · {plan['summary']['order_count']} order(s)",
+                {"net_cash_cr": _cr(net_cash)})
+    yield _step("package", 4, "package:recommendation", "Selected the recommendation",
+                f"{plan['summary']['compliance_status']} · {recommendation.split('.')[0]}",
+                {"compliance_status": plan["summary"]["compliance_status"],
+                 "recommendation": recommendation})
+    yield _step("package", 4, "package:created", "Created plan for PIC review",
+                f"{plan['plan_id']} · {plan['status']}",
+                {"plan_id": plan["plan_id"], "status": plan["status"]})
+    yield {"type": "plan", "plan": plan}
