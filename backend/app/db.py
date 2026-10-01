@@ -302,6 +302,28 @@ def get_plan(plan_id: str) -> dict | None:
         return None
 
 
+def list_plans(fund_id: str | None = None) -> list[dict] | None:
+    """Return full stored plans newest first, or ``None`` if storage is unavailable."""
+    if not available():
+        return None
+    try:
+        with connect() as conn:
+            rows = conn.execute(
+                "SELECT plan_json FROM plans "
+                "WHERE (? IS NULL OR fund_id = ?) ORDER BY created_at DESC",
+                (fund_id, fund_id),
+            ).fetchall()
+    except sqlite3.Error:
+        return None
+    plans = []
+    for row in rows:
+        try:
+            plans.append(json.loads(row["plan_json"]))
+        except (TypeError, json.JSONDecodeError):
+            continue
+    return plans
+
+
 def save_decision(plan_id: str, status: str, decision: dict) -> bool:
     """Record a PIC decision: append to ``plan_decisions`` and update the plan's
     status + embedded decision in ``plan_json``. Returns ``False`` if unavailable
