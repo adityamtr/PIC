@@ -21,7 +21,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pandas_market_calendars as mcal
 
-from . import data, data_v2, forecast, optimizer, policy, tax_lots, tax_rules
+from . import data, data_v2, db, forecast, optimizer, policy, tax_lots, tax_rules
 
 CRORE = data.CRORE
 
@@ -29,6 +29,22 @@ CRORE = data.CRORE
 # proposals arrive already inside the SEBI single-issuer limit that the
 # compliance rules re-check afterwards.
 _ISSUER_CAP_FRAC = data.COMPLIANCE_LIMITS["single_issuer_limit"] / 100
+
+# Square-root market-impact heuristic: estimated cost (bps) = coefficient *
+# sqrt(participation), participation = order value / effective ADV. This is a
+# standard first-order approximation for how much trading against a stock's own
+# volume moves the price against you — not a calibrated execution-cost engine,
+# but enough to compare orders/days on a common, money-like scale and to give
+# the PIC reviewer an indicative ₹ cost instead of a dimensionless ratio.
+_IMPACT_COEF_BPS = 15.0
+
+# Indian equity cash-market settlement is T+1 (one trading session after the
+# trade). Used only to sanity-check a PM-supplied settlement_date against the
+# real calendar — see _check_settlement_window. These never block a plan: per
+# product guidance, large contribution/redemption plans must stay executable,
+# not hard-blocked, so an odd-looking window is surfaced as a warning only.
+_EXPECTED_SETTLEMENT_SESSIONS = 1
+_MAX_REASONABLE_SETTLEMENT_SESSIONS = 5
 
 _SECTOR_ALIASES = {
     "technology": "Information Technology", "tech": "Information Technology",
@@ -90,8 +106,90 @@ def _order(ds, ticker, side, rupees=None, shares=None):
     }
 
 
-def _schedule_order_trade_dates(ds, orders, trade_date, settlement_date):
-    """Suggest regular-session dates, balancing orders by estimated ADV impact."""
+def _market_impact_bps(value_cr, effective_adv_cr):
+    """Square-root market-impact estimate in bps for trading `value_cr` crore
+    against an `effective_adv_cr` crore average daily volume. See the
+    `_IMPACT_COEF_BPS` module note for what this model does and doesn't capture."""
+    if not effective_adv_cr or value_cr <= 0:
+        return 0.0
+    participation = value_cr / effective_adv_cr
+    return _IMPACT_COEF_BPS * math.sqrt(participation)
+
+
+def _check_settlement_window(trade_date, settlement_date):
+    """Sanity-check a PM-supplied settlement_date against the real NSE/BSE
+    calendar instead of trusting it as-is. Indian equity settlement is T+1 (one
+    trading session after the trade). Only ever returns warnings — see the
+    `_EXPECTED_SETTLEMENT_SESSIONS` module note on why this doesn't block."""
+    if settlement_date <= trade_date:
+        return [f"Settlement date {settlement_date.isoformat()} is not after trade date "
+                f"{trade_date.isoformat()} — standard T+1 settlement needs at least one "
+                "trading session between them; orders will use the trade date as-is instead "
+                "of a multi-day schedule."]
+    try:
+        session_range = {"start_date": trade_date, "end_date": settlement_date}
+        sessions = mcal.get_calendar("NSE").valid_days(**session_range).intersection(
+            mcal.get_calendar("BSE").valid_days(**session_range)
+        ).date.tolist()
+    except Exception:
+        return []
+    gap_sessions = len([d for d in sessions if trade_date < d <= settlement_date])
+    if gap_sessions < _EXPECTED_SETTLEMENT_SESSIONS:
+        return [f"No NSE/BSE trading session falls between {trade_date.isoformat()} and "
+                f"settlement date {settlement_date.isoformat()} — standard T+1 settlement "
+                "is not achievable in this window."]
+    if gap_sessions > _MAX_REASONABLE_SETTLEMENT_SESSIONS:
+        return [f"Settlement window spans {gap_sessions} trading sessions, well beyond the "
+                "standard T+1 cycle — confirm the settlement date is intentional."]
+    return []
+
+
+def _committed_daily_load(trading_dates):
+    """Market-impact load (in the same bps-equivalent units as
+    `_market_impact_bps`) that *other* stored plans have already booked on
+    these sessions, so a new plan's greedy balance can see — and route around
+    — volume other plans have already committed to a given day. Liquidity is a
+    market-wide resource (a stock's ADV doesn't care which fund trades it), so
+    this looks across every stored plan, not just the current fund's.
+
+    Uses the static universe ADV rather than loading every other plan's own
+    fund dataset — a deliberate approximation for what is only an
+    informational, non-blocking signal. Degrades to "nothing committed"
+    (returns {}) if plan storage is unavailable, matching db.py's
+    fail-open contract so scheduling still works without a DB.
+    """
+    load = {day: 0.0 for day in trading_dates}
+    if not trading_dates:
+        return load
+    try:
+        plans = db.list_plans() or []
+    except Exception:
+        return load
+    window = {day.isoformat(): day for day in trading_dates}
+    for plan in plans:
+        if str(plan.get("status", "")).strip().lower() == "rejected":
+            continue  # a rejected plan's orders will never actually trade
+        for order in plan.get("orders", []):
+            day = window.get(order.get("trade_date"))
+            if day is None:
+                continue
+            universe_entry = data.universe_entry(order.get("ticker") or "")
+            adv_cr = universe_entry.get("adv_cr") if universe_entry else None
+            value_cr = float(order.get("est_value") or 0) / CRORE
+            load[day] += _market_impact_bps(value_cr, adv_cr)
+    return load
+
+
+def _schedule_order_trade_dates(ds, orders, returns, trade_date, settlement_date):
+    """Suggest regular-session dates for each order:
+      - balancing orders across days by estimated market-impact cost (bps),
+        seeded with load other pending plans have already booked that day;
+      - steering higher-conviction orders (larger |expected return|) to the
+        lightest-loaded day first, so urgency — not just liquidity — drives
+        who gets first pick of a day;
+      - avoiding a ticker's own known event date where another session in the
+        window allows it.
+    """
     session_range = {
         "start_date": trade_date,
         "end_date": settlement_date - timedelta(days=1),
@@ -106,33 +204,130 @@ def _schedule_order_trade_dates(ds, orders, trade_date, settlement_date):
             "settlement dates; order trade dates were not suggested."
         ]
 
-    def liquidity_load(order):
+    def effective_adv_cr(order):
         entity = policy._entity(ds, order["ticker"])
         adv_cr = entity.get("adv_cr")
         median_adv_cr = entity.get("median_adv_cr") or adv_cr
-        effective_adv_cr = min(adv_cr, median_adv_cr) if adv_cr and median_adv_cr else None
+        return min(adv_cr, median_adv_cr) if adv_cr and median_adv_cr else None
+
+    def impact_bps(order):
         value_cr = float(order.get("est_value") or 0) / CRORE
-        return value_cr / effective_adv_cr if effective_adv_cr else value_cr
+        return _market_impact_bps(value_cr, effective_adv_cr(order))
+
+    def event_date_to_avoid(order):
+        ev = data.event_for(ds, order["ticker"])
+        if not ev:
+            return None
+        ev_date = date.fromisoformat(ev["event_date"])
+        return ev_date if ev_date in trading_dates else None
+
+    def expected_return(order):
+        return abs(returns.get(order["ticker"]) or forecast.expected_return(order["ticker"]) or 0)
 
     ordered = sorted(
         orders,
         key=lambda order: (
             order.get("side") != "SELL",
-            -liquidity_load(order),
+            -expected_return(order),
             order.get("ticker", ""),
         ),
     )
-    daily_load = {day: 0.0 for day in trading_dates}
-    for order in ordered:
-        selected_date = min(trading_dates, key=lambda day: (daily_load[day], day))
-        order["trade_date"] = selected_date.isoformat()
-        daily_load[selected_date] += liquidity_load(order)
 
-    return []
+    warnings = []
+    daily_load = _committed_daily_load(trading_dates)
+    for order in ordered:
+        avoid = event_date_to_avoid(order)
+        candidates = [day for day in trading_dates if day != avoid] or trading_dates
+        selected_date = min(candidates, key=lambda day: (daily_load[day], day))
+        if avoid is not None and selected_date == avoid:
+            ev = data.event_for(ds, order["ticker"])
+            warnings.append(
+                f"{order['ticker']}: no trading session avoids {ev['event']} on "
+                f"{ev['event_date']} within this window — order was still scheduled on it."
+            )
+        cost_bps = impact_bps(order)
+        order["trade_date"] = selected_date.isoformat()
+        order["est_impact_bps"] = round(cost_bps, 1)
+        order["est_impact_cost"] = round(cost_bps / 10_000 * float(order.get("est_value") or 0), 0)
+        daily_load[selected_date] += cost_bps
+
+    return warnings
 
 
 def _usable_price(price):
     return isinstance(price, (int, float)) and math.isfinite(price) and price > 0
+
+
+def _augment_pending_trades_from_approved_plans(fund_id):
+    """Fetch orders from approved, emailed plans in the DB and convert them to
+    pending-trade format so they reduce investable cash and sellable shares for
+    subsequent plans. Only plans that are both approved *and* have sent emails
+    (i.e. execution instructions were actually sent) are included — these are
+    real market commitments.
+
+    Returns an empty list if DB is unavailable or no approved/emailed plans
+    exist. Never raises; degradation is graceful per db.py's fail-open contract."""
+    try:
+        plans = db.list_plans(fund_id) or []
+    except Exception:
+        return []
+
+    approved_trades = []
+    for plan in plans:
+        status_str = str(plan.get("status", "")).lower()
+        # Match "Approved — sent to Trading" and similar patterns, but exclude
+        # "Returned for Modification", "Rejected", "Pending PIC Review", "Escalated"
+        if not any(s in status_str for s in ["approved", "sent to trading"]):
+            continue
+
+        # Only include if execution email was actually sent (not just approved)
+        try:
+            sent_emails = db.list_sent_emails(plan.get("plan_id")) or []
+            if not sent_emails:
+                continue
+        except Exception:
+            # If we can't check email status, don't include the plan (safer)
+            continue
+
+        for order in plan.get("orders", []):
+            ticker = order.get("ticker")
+            side = order.get("side")
+            shares = order.get("shares")
+            price = order.get("price")
+
+            if not all([ticker, side, shares, price]):
+                continue
+
+            gross = shares * price
+            trade_date_str = order.get("trade_date")
+            settlement_date_str = order.get("settlement_date")
+
+            if not (trade_date_str and settlement_date_str):
+                continue
+
+            try:
+                td = date.fromisoformat(trade_date_str)
+                sd = date.fromisoformat(settlement_date_str)
+                settlement_days = (sd - td).days
+            except (ValueError, TypeError):
+                continue
+
+            # Lookup ticker name from universe; fall back to ticker itself if not found
+            u = data.universe_entry(ticker)
+            name = u.get("name") if u else ticker
+            approved_trades.append({
+                "trade_id": f"{plan['plan_id']}-{ticker}",
+                "ticker": ticker, "name": name, "side": side,
+                "shares": shares, "price": price, "gross_value": gross,
+                "cash_impact": -gross if side == "BUY" else gross,
+                "trade_date": trade_date_str,
+                "settlement_date": settlement_date_str,
+                "settlement_days": settlement_days,
+                "cycle": f"T+{settlement_days}",
+                "status": f"Approved (Plan {plan['plan_id']})",
+            })
+
+    return approved_trades
 
 
 def _available_sellable_shares(ds, holding):
@@ -774,7 +969,20 @@ def iter_plan_steps(fund_id, intent):
     ``{"type": "plan", "plan": <plan dict>}``. The SSE endpoint streams these;
     :func:`generate_plan` drains them for non-streaming callers.
     """
-    ds = _get_ds(fund_id)
+    # _get_ds returns the SAME cached dict every call (data_v2.FUNDS_V2[...] /
+    # data.FUNDS[...]) — shallow-copy it before attaching request-scoped data so
+    # we never mutate the shared cache (a prior version assigned directly into
+    # the cached dict's "pending_trades" key, which permanently baked that
+    # moment's approved-plan trades into the shared cache and caused them to be
+    # re-added — duplicated — on every later read).
+    ds = dict(_get_ds(fund_id))
+    # Augment static pending trades with orders from approved plans so this plan
+    # sees the full commitment picture (reduced investable cash, reduced
+    # sellable shares, etc.). This is part of cross-plan awareness.
+    ds["pending_trades"] = (
+        list(ds["pending_trades"]) +
+        _augment_pending_trades_from_approved_plans(fund_id)
+    )
     action = (intent.get("action") or "contribution").lower()
     target = intent.get("target") or ""
     amount = float(intent.get("amount_cr") or 0) * CRORE
@@ -896,9 +1104,13 @@ def iter_plan_steps(fund_id, intent):
         orders, funding_sources, risk_notes, warnings = _orders_by_rules(
             ds, action, sectors, amount, investable, target)
 
+    if trade_date and settlement_date:
+        warnings.extend(_check_settlement_window(
+            date.fromisoformat(trade_date), date.fromisoformat(settlement_date)))
+
     if trade_date and settlement_date and horizon > 0:
         warnings.extend(_schedule_order_trade_dates(
-            ds, orders, date.fromisoformat(trade_date), date.fromisoformat(settlement_date)))
+            ds, orders, returns, date.fromisoformat(trade_date), date.fromisoformat(settlement_date)))
     elif trade_date:
         for order in orders:
             order["trade_date"] = trade_date
@@ -921,6 +1133,13 @@ def iter_plan_steps(fund_id, intent):
     yield _step("allocation", 2, "allocation:orders", "Sized share-level orders",
                 f"{len(orders)} order(s) · {buy_ct} buy / {sell_ct} sell",
                 {"order_count": len(orders), "buy_count": buy_ct, "sell_count": sell_ct})
+    _scheduled_ct = sum(1 for o in orders if o.get("trade_date"))
+    _impact_so_far = sum(o.get("est_impact_cost") or 0 for o in orders)
+    yield _step("allocation", 2, "allocation:schedule", "Scheduled order trade dates",
+                (f"{_scheduled_ct}/{len(orders)} order(s) dated across trading sessions · "
+                 f"~₹{_cr(_impact_so_far)} cr est. market-impact cost"
+                 if _scheduled_ct else "No trade/settlement window supplied — dates not scheduled"),
+                {"scheduled_count": _scheduled_ct, "est_impact_cost_cr": _cr(_impact_so_far)})
 
     # Attach the per-order tax breakdown (STCG/LTCG/STT over the synthetic
     # lots, consumed least-tax-first) to every SELL, whatever the method.
@@ -966,6 +1185,14 @@ def iter_plan_steps(fund_id, intent):
     total_buy = sum(o["est_value"] for o in orders if o["side"] == "BUY")
     total_sell = sum(o["est_value"] for o in orders if o["side"] == "SELL")
     net_cash = total_sell - total_buy
+    # Value-weighted estimated market-impact cost/bps across all scheduled
+    # orders (0 for any order that wasn't date-scheduled, e.g. no trade/
+    # settlement window was supplied).
+    total_impact_cost = sum(o.get("est_impact_cost") or 0 for o in orders)
+    total_order_value = sum(o["est_value"] for o in orders) or 1
+    weighted_impact_bps = round(
+        sum((o.get("est_impact_bps") or 0) * o["est_value"] for o in orders) / total_order_value, 1
+    )
 
     has_fail = any(c["status"] == "FAIL" for c in compliance)
     has_policy_block = policy_result["status"] == "BLOCK"
@@ -1015,6 +1242,9 @@ def iter_plan_steps(fund_id, intent):
             "est_total_tax_cr": round(tax_context["est_total_tax"] / CRORE, 4),
             "tax_drag_bps": tax_context["tax_drag_bps"],
             "stcg_share_pct": tax_context["stcg_share_pct"],
+            "est_total_impact_cost": round(total_impact_cost, 0),
+            "est_total_impact_cost_cr": round(total_impact_cost / CRORE, 4),
+            "est_weighted_impact_bps": weighted_impact_bps,
             "compliance_status": "FAIL" if has_fail else ("WARN" if has_warn else "PASS"),
             "policy_status": policy_result["status"],
             "execution_allowed": policy_result["execution_allowed"] and not has_fail,
