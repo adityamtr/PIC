@@ -51,11 +51,19 @@ class IntentRequest(BaseModel):
     method: Literal["manual", "rules", "optimize"] = Field(
         "optimize",
         description="Allocation method: 'manual' (use selected securities), 'rules' "
-                    "(heuristic drift/target logic), or 'optimize' (forecast-driven convex "
-                    "optimization via CVXPY). Compliance & risk rules run on the result either way.",
+                "(heuristic drift/target logic), or 'optimize' (forecast-driven CVXPY "
+                "optimization with historical-volatility target tracking). Compliance & "
+                "risk rules run on the result either way.",
     )
     note: Optional[str] = Field(None, description="Free-text note from the PM.")
     fund_id: Optional[str] = Field(None, description="Fund to plan for (defaults to the default fund).")
+    target_volatility: Optional[float] = Field(
+        None, ge=0, lt=2,
+        description="Target post-trade annualized volatility (fraction, e.g. 0.18 = 18%). "
+                "The optimizer aims for this target using historical covariance, subject to "
+                "allocation constraints. Defaults to the fund's curated strategy mandate "
+                "upper band when omitted; the target may be unreachable for a given plan.",
+    )
 
     @model_validator(mode="after")
     def validate_date_range(self):

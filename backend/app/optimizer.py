@@ -63,6 +63,58 @@ _UNIT = 10_000_000  # 1 crore
 _OK = {"optimal", "optimal_inaccurate"}
 
 
+def _risk_constraint(weight_by_ticker: dict, risk: dict):
+    """Build the initial convex ``w^T Sigma w <= target^2 / 12`` bound over
+    whichever tickers the caller has a weight expression for. ``risk`` is the
+    dict planner._build_risk_context() produces: {tickers, cov_monthly,
+    target_volatility, ...}. Tickers in risk["tickers"] missing from
+    weight_by_ticker (shouldn't normally happen) are skipped."""
+    tickers = [t for t in risk["tickers"] if t in weight_by_ticker]
+    if len(tickers) < 2:
+        return None
+    idx = [risk["tickers"].index(t) for t in tickers]
+    cov = risk["cov_monthly"][np.ix_(idx, idx)]
+    w = cp.hstack([weight_by_ticker[t] for t in tickers])
+    target = risk.get("target_volatility", risk.get("sigma_max_annual"))
+    sigma_max_monthly_var = (target ** 2) / 12.0
+    return cp.quad_form(w, cov) <= sigma_max_monthly_var
+
+
+def _fit_risk_target(x0, risk, weights_for_x, constraints, bounds):
+    """Move a feasible allocation toward the requested annualized volatility.
+
+    The target can be infeasible under the allocation constraints; in that
+    case SLSQP returns the closest feasible point it found, and the caller can
+    report the achieved volatility alongside the target.
+    """
+    target = (risk or {}).get("target_volatility") or (risk or {}).get("sigma_max_annual")
+    if target is None or target < 0:
+        return x0, None
+
+    from scipy.optimize import minimize
+
+    covariance = np.asarray(risk["cov_monthly"], dtype=float)
+
+    def annualized_volatility(values):
+        weights = np.asarray(weights_for_x(values), dtype=float)
+        monthly_variance = float(weights @ covariance @ weights)
+        return float(np.sqrt(max(monthly_variance, 0.0) * 12.0))
+
+    initial = np.asarray(x0, dtype=float)
+    scale = max(float(target), 0.01)
+
+    def objective(values):
+        target_gap = (annualized_volatility(values) - target) / scale
+        return target_gap * target_gap + 1e-9 * float(np.sum((values - initial) ** 2))
+
+    result = minimize(
+        objective, initial, method="SLSQP", bounds=bounds, constraints=constraints,
+        options={"ftol": 1e-12, "maxiter": 500},
+    )
+    chosen = result.x if result.success and np.all(np.isfinite(result.x)) else initial
+    return chosen, annualized_volatility(chosen)
+
+
 def _solve_continuous(prob):
     """Try a few solvers in order; return the status of the first that lands on
     an (near-)optimal solution, else the last status seen."""
@@ -82,7 +134,7 @@ def _solve_continuous(prob):
 # Buy: deploy `amount` to maximize expected return of deployed capital
 # --------------------------------------------------------------------------- #
 def optimize_buy(candidates, amount, aum, issuer_cap_frac, max_name_frac=0.34,
-                 sector_cap_frac=None, sector_current=None, cap_aum=None):
+                 sector_cap_frac=None, sector_current=None, cap_aum=None, risk=None):
     """
     candidates: list of {ticker, price, current_value, expected_return, sector}
     amount:     rupees to deploy
@@ -93,6 +145,11 @@ def optimize_buy(candidates, amount, aum, issuer_cap_frac, max_name_frac=0.34,
     sector_cap_frac / sector_current: if given, no sector's post-trade value may
                 exceed sector_cap_frac of cap_aum. `sector_current` is the fund's
                 existing rupee value per sector (across all holdings).
+    risk:       optional dict from planner._build_risk_context() — constrains
+                post-trade portfolio volatility to risk["sigma_max_annual"]
+                (annualized) using a real monthly return covariance. Tickers
+                outside `candidates` keep their current (fixed) weight in the
+                constraint; relaxed before the sector cap if infeasible.
     Returns (allocations, meta) where allocations = [{ticker, rupees}] for the
     names the optimizer chose to buy.
     """
@@ -112,7 +169,19 @@ def optimize_buy(candidates, amount, aum, issuer_cap_frac, max_name_frac=0.34,
 
     buy = cp.Variable(n, nonneg=True)  # crore deployed per name
 
-    def _build(with_name_cap, with_sector_cap):
+    risk_cons = None
+    if risk:
+        idx_by_ticker = {c["ticker"]: i for i, c in enumerate(candidates)}
+        current_value_by_ticker = risk.get("current_value_by_ticker", {})
+        weight_by_ticker = {}
+        for t in risk["tickers"]:
+            cur_frac = current_value_by_ticker.get(t, 0.0) / cap_basis
+            weight_by_ticker[t] = (
+                cur_frac + buy[idx_by_ticker[t]] * _UNIT / cap_basis if t in idx_by_ticker else cur_frac
+            )
+        risk_cons = _risk_constraint(weight_by_ticker, risk)
+
+    def _build(with_name_cap, with_sector_cap, with_risk_cap):
         cons = [cp.sum(buy) == amount_u, cur + buy <= issuer_cap_u]
         if with_name_cap:
             cons.append(buy <= max_name_frac * amount_u)
@@ -122,24 +191,71 @@ def optimize_buy(candidates, amount, aum, issuer_cap_frac, max_name_frac=0.34,
                 idx = [i for i, x in enumerate(sectors) if x == s]
                 cur_sector_u = sector_current.get(s, 0.0) / _UNIT
                 cons.append(cur_sector_u + cp.sum(buy[idx]) <= sector_cap_u)
+        if with_risk_cap and risk_cons is not None:
+            cons.append(risk_cons)
         return cp.Problem(cp.Maximize(ret @ buy), cons)
 
-    prob = _build(with_name_cap=True, with_sector_cap=True)
+    risk_applied = risk_cons is not None
+    name_cap_applied = True
+    sector_cap_applied = bool(sector_cap_frac)
+    prob = _build(with_name_cap=True, with_sector_cap=True, with_risk_cap=risk_applied)
     solver, status = _solve_continuous(prob)
     if status not in _OK:
         # Diversification cap may make it infeasible for large tickets; relax the
-        # per-name cap first, keeping the compliance issuer/sector caps.
-        prob = _build(with_name_cap=False, with_sector_cap=True)
+        # per-name cap first, keeping the compliance issuer/sector caps and the
+        # risk ceiling.
+        name_cap_applied = False
+        prob = _build(with_name_cap=False, with_sector_cap=True, with_risk_cap=risk_applied)
+        solver, status = _solve_continuous(prob)
+    if status not in _OK and risk_applied:
+        # The user's risk ceiling is a preference, not a SEBI rule; relax it
+        # next, ahead of the hard compliance caps.
+        risk_applied = False
+        prob = _build(with_name_cap=False, with_sector_cap=True, with_risk_cap=False)
         solver, status = _solve_continuous(prob)
     if status not in _OK:
         # Last resort: drop the sector cap so a plan is still produced; the
         # policy layer will surface any residual sector breach for review.
-        prob = _build(with_name_cap=False, with_sector_cap=False)
+        sector_cap_applied = False
+        prob = _build(with_name_cap=False, with_sector_cap=False, with_risk_cap=False)
         solver, status = _solve_continuous(prob)
     if status not in _OK:
         raise OptimizationFailed(f"buy optimization status: {status}")
 
     raw_rupees = np.clip(np.asarray(buy.value).flatten(), 0.0, None) * _UNIT
+    target_volatility = None
+    if risk:
+        initial = raw_rupees / (_UNIT * amount_u)
+        scipy_constraints = [
+            {"type": "eq", "fun": lambda values: float(np.sum(values) - 1.0)},
+            {"type": "ineq", "fun": lambda values: issuer_cap_u - cur - amount_u * values},
+        ]
+        bounds = [(0.0, max_name_frac if name_cap_applied else 1.0)] * n
+        if sector_cap_applied and sector_cap_frac:
+            sector_cap_u = sector_cap_frac * cap_basis / _UNIT
+            for sector in sorted({value for value in sectors if value is not None}):
+                indices = [i for i, value in enumerate(sectors) if value == sector]
+                cur_sector_u = sector_current.get(sector, 0.0) / _UNIT
+                scipy_constraints.append({
+                    "type": "ineq",
+                    "fun": lambda values, indices=indices, cur_sector_u=cur_sector_u:
+                        sector_cap_u - cur_sector_u - amount_u * np.sum(values[indices]),
+                })
+
+        def _buy_weights(values):
+            current_values = risk.get("current_value_by_ticker", {})
+            index_by_ticker = {candidate["ticker"]: i for i, candidate in enumerate(candidates)}
+            return np.array([
+                (current_values.get(ticker, 0.0)
+                 + (amount_u * values[index_by_ticker[ticker]] * _UNIT
+                    if ticker in index_by_ticker else 0.0)) / cap_basis
+                for ticker in risk["tickers"]
+            ])
+
+        fitted, target_volatility = _fit_risk_target(
+            initial, risk, _buy_weights, scipy_constraints, bounds,
+        )
+        raw_rupees = np.clip(fitted, 0.0, None) * amount_u * _UNIT
 
     allocations = []
     for i, c in enumerate(candidates):
@@ -154,17 +270,28 @@ def optimize_buy(candidates, amount, aum, issuer_cap_frac, max_name_frac=0.34,
         "objective": "maximize expected 1M return of deployed capital",
         "deployed_return_pct": round(deployed / amount * 100, 3) if amount else 0.0,
     }
+    if risk is not None:
+        meta["risk_constrained"] = risk_applied
+        meta["initial_risk_bound_applied"] = risk_applied
+        meta["sigma_max_annual"] = risk["sigma_max_annual"]
+        meta["target_volatility"] = risk.get("target_volatility", risk["sigma_max_annual"])
+        if target_volatility is not None:
+            meta["risk_target_achieved_annual"] = round(target_volatility, 4)
     return allocations, meta
 
 
 # --------------------------------------------------------------------------- #
 # Sell: raise `amount` by selling the lowest expected-return names (removal)
 # --------------------------------------------------------------------------- #
-def optimize_sell(candidates, amount, max_name_frac=0.34, horizon_days=None):
+def optimize_sell(candidates, amount, max_name_frac=0.34, horizon_days=None, risk=None, aum=None):
     """
     candidates: list of {ticker, price, sellable_shares, expected_return,
                          tax_rate?, txn_rate?}
     amount:     rupees to raise
+    risk:       optional dict from planner._build_risk_context() — constrains
+                post-trade portfolio volatility to risk["sigma_max_annual"].
+                Requires `aum` (the post-trade AUM basis) to express sell
+                values as portfolio weights; skipped if `aum` is not given.
     Returns (sells, meta) where sells = [{ticker, shares}].
 
     This is the `mozart` removal idea (raise the target while giving up the least
@@ -199,33 +326,81 @@ def optimize_sell(candidates, amount, max_name_frac=0.34, horizon_days=None):
 
     val = cp.Variable(n, nonneg=True)   # crore to sell per name
 
-    def _build(with_name_cap, coeff):
+    risk_cons = None
+    if risk and aum:
+        idx_by_ticker = {c["ticker"]: i for i, c in enumerate(live)}
+        current_value_by_ticker = risk.get("current_value_by_ticker", {})
+        weight_by_ticker = {}
+        for t in risk["tickers"]:
+            cur_frac = current_value_by_ticker.get(t, 0.0) / aum
+            weight_by_ticker[t] = (
+                cur_frac - val[idx_by_ticker[t]] * _UNIT / aum if t in idx_by_ticker else cur_frac
+            )
+        risk_cons = _risk_constraint(weight_by_ticker, risk)
+
+    def _build(with_name_cap, with_risk_cap, coeff):
         cons = [val <= sellable_u, cp.sum(val) == target_u]
         if with_name_cap:
             # Spread the raise so no single name funds most of it (market impact).
             cons.append(val <= max_name_frac * target_u)
+        if with_risk_cap and risk_cons is not None:
+            cons.append(risk_cons)
         # coeff @ val = horizon-scaled return given up + tax + txn cost (crore).
         return cp.Problem(cp.Minimize(coeff @ val), cons)
 
     def _solve(coeff):
-        prob = _build(True, coeff)
+        risk_applied = risk_cons is not None
+        name_cap_applied = True
+        prob = _build(True, risk_applied, coeff)
         solver, status = _solve_continuous(prob)
         if status not in _OK:
             # Too few names with capacity for the cap; relax it.
-            prob = _build(False, coeff)
+            name_cap_applied = False
+            prob = _build(False, risk_applied, coeff)
+            solver, status = _solve_continuous(prob)
+        if status not in _OK and risk_applied:
+            # The risk ceiling is a preference, not a hard constraint; relax it next.
+            risk_applied = False
+            prob = _build(False, False, coeff)
             solver, status = _solve_continuous(prob)
         if status not in _OK:
             raise OptimizationFailed(f"sell optimization status: {status}")
-        return np.clip(np.asarray(val.value).flatten(), 0.0, None) * _UNIT, solver, status
+        values = np.clip(np.asarray(val.value).flatten(), 0.0, None) * _UNIT
+        target_volatility = None
+        if risk:
+            initial = values / (target_u * _UNIT)
+            scipy_constraints = [{"type": "eq", "fun": lambda fractions: float(np.sum(fractions) - 1.0)}]
+            bounds = [
+                (0.0, min(float(cap), max_name_frac if name_cap_applied else 1.0))
+                for cap in sellable_u / target_u
+            ]
+            if name_cap_applied:
+                bounds = [(0.0, min(cap, max_name_frac)) for cap in sellable_u / target_u]
 
-    val_rupees, solver, status = _solve(cost)
+            def _sell_weights(fractions):
+                current_values = risk.get("current_value_by_ticker", {})
+                index_by_ticker = {candidate["ticker"]: i for i, candidate in enumerate(live)}
+                return np.array([
+                    (current_values.get(ticker, 0.0)
+                     - (target_u * fractions[index_by_ticker[ticker]] * _UNIT
+                        if ticker in index_by_ticker else 0.0)) / aum
+                    for ticker in risk["tickers"]
+                ])
+
+            values_fit, target_volatility = _fit_risk_target(
+                initial, risk, _sell_weights, scipy_constraints, bounds,
+            )
+            values = np.clip(values_fit, 0.0, None) * target_u * _UNIT
+        return values, solver, status, risk_applied, target_volatility
+
+    val_rupees, solver, status, risk_applied, target_volatility = _solve(cost)
 
     tax_aware = bool(np.any(tax != 0.0) or np.any(txn != 0.0))
     # Demo storytelling: what would the tax-blind plan have cost in tax?
     naive_tax_cr = None
     if tax_aware:
         try:
-            naive_rupees, _, _ = _solve(ret * horizon_scale)
+            naive_rupees, _, _, _, _ = _solve(ret * horizon_scale)
             naive_tax_cr = float((tax + txn) @ naive_rupees) / _UNIT
         except OptimizationFailed:
             naive_tax_cr = None
@@ -257,19 +432,33 @@ def optimize_sell(candidates, amount, max_name_frac=0.34, horizon_days=None):
         meta["horizon_scale"] = round(horizon_scale, 3)
         if naive_tax_cr is not None:
             meta["tax_saved_vs_naive_cr"] = round(naive_tax_cr - (est_tax + est_txn) / _UNIT, 4)
+    if risk is not None:
+        meta["risk_constrained"] = risk_applied
+        meta["initial_risk_bound_applied"] = risk_applied
+        meta["sigma_max_annual"] = risk["sigma_max_annual"]
+        meta["target_volatility"] = risk.get("target_volatility", risk["sigma_max_annual"])
+        if target_volatility is not None:
+            meta["risk_target_achieved_annual"] = round(target_volatility, 4)
     return sells, meta
 
 
 # --------------------------------------------------------------------------- #
 # Rebalance: retilt the whole book toward higher expected return
 # --------------------------------------------------------------------------- #
-def optimize_rebalance(holdings, aum, issuer_cap_frac, turnover_frac=0.15):
+def optimize_rebalance(holdings, aum, issuer_cap_frac, turnover_frac=0.15, risk=None,
+                       sector_drift_frac=0.02):
     """
     holdings: the fund's holdings (each has market_value, price, sellable_shares,
               expected_return).
+    risk:     optional dict from planner._build_risk_context() — constrains the
+              rebalanced book's volatility to risk["sigma_max_annual"]. Relaxed
+              (with a warning-free silent drop, same as the turnover/issuer caps
+              can't be) only if it alone makes the problem infeasible.
     Returns (targets, meta) where targets = [{ticker, delta_rupees}] — positive
     means buy, negative means sell. Maximizes expected return subject to an
     issuer cap and an L1 turnover budget, staying (near) cash-neutral.
+    Sector weights are kept within ``sector_drift_frac`` of their current
+    AUM-relative weights to avoid large cross-sector shifts.
     """
     _require()
     n = len(holdings)
@@ -279,6 +468,20 @@ def optimize_rebalance(holdings, aum, issuer_cap_frac, turnover_frac=0.15):
     ret = np.array([h["expected_return"] for h in holdings], dtype=float)
     w_cur = np.array([h["market_value"] / aum for h in holdings], dtype=float)
     invested = float(w_cur.sum())
+    sector_indices = {}
+    for i, holding in enumerate(holdings):
+        sector = holding.get("sector")
+        if sector:
+            sector_indices.setdefault(sector, []).append(i)
+    current_sector_weights = {
+        sector: float(np.sum(w_cur[indices]))
+        for sector, indices in sector_indices.items()
+    }
+    sellable_weight = np.array([
+        max(float(h.get("sellable_shares", 0) or 0) * float(h.get("price", 0) or 0) / aum, 0.0)
+        for h in holdings
+    ])
+    min_weight = np.maximum(w_cur - sellable_weight, 0.0)
     # Exit tax + transaction cost per rupee sold; penalizes realized gains so
     # the rebalance does not churn high-tax (short-term winner) positions.
     # Clipped at 0: a position at a net loss has a negative rate here, and
@@ -290,19 +493,67 @@ def optimize_rebalance(holdings, aum, issuer_cap_frac, turnover_frac=0.15):
         for h in holdings], dtype=float), 0.0, None)
 
     w = cp.Variable(n)
-    cons = [
+    base_cons = [
         cp.sum(w) == invested,        # stay as invested as we are now (cash-neutral)
-        w >= 0,                       # long-only
+        w >= min_weight,              # long-only; do not sell locked shares
         w <= issuer_cap_frac,         # per-issuer cap
         cp.norm1(w - w_cur) <= turnover_frac,   # limit churn
     ]
+    for sector, indices in sector_indices.items():
+        current_weight = current_sector_weights[sector]
+        sector_weight = cp.sum(w[indices])
+        base_cons.extend([
+            sector_weight >= max(current_weight - sector_drift_frac, 0.0),
+            sector_weight <= current_weight + sector_drift_frac,
+        ])
     tax_penalty = exit_cost @ cp.pos(w_cur - w)   # convex: tax applies to sells only
+
+    risk_cons = None
+    if risk:
+        index_by_ticker = {h["ticker"]: i for i, h in enumerate(holdings)}
+        weight_by_ticker = {t: w[index_by_ticker[t]] for t in risk["tickers"] if t in index_by_ticker}
+        risk_cons = _risk_constraint(weight_by_ticker, risk)
+
+    risk_applied = risk_cons is not None
+    cons = base_cons + ([risk_cons] if risk_applied else [])
     prob = cp.Problem(cp.Maximize(ret @ w - tax_penalty), cons)
     solver, status = _solve_continuous(prob)
+    if status not in _OK and risk_applied:
+        # The risk ceiling is a preference, not a hard constraint; relax it
+        # before giving up on the plan entirely.
+        risk_applied = False
+        prob = cp.Problem(cp.Maximize(ret @ w - tax_penalty), base_cons)
+        solver, status = _solve_continuous(prob)
     if status not in _OK:
         raise OptimizationFailed(f"rebalance optimization status: {status}")
 
     w_new = np.asarray(w.value).flatten()
+    target_volatility = None
+    if risk:
+        index_by_ticker = {holding["ticker"]: i for i, holding in enumerate(holdings)}
+        scipy_constraints = [
+            {"type": "eq", "fun": lambda values: float(np.sum(values) - invested)},
+            {"type": "ineq", "fun": lambda values: turnover_frac - float(np.sum(np.abs(values - w_cur)))},
+        ]
+        for sector, indices in sector_indices.items():
+            current_weight = current_sector_weights[sector]
+            scipy_constraints.extend([
+                {"type": "ineq", "fun": lambda values, indices=indices, current_weight=current_weight:
+                    float(np.sum(values[indices]) - current_weight + sector_drift_frac)},
+                {"type": "ineq", "fun": lambda values, indices=indices, current_weight=current_weight:
+                    float(current_weight + sector_drift_frac - np.sum(values[indices]))},
+            ])
+
+        def _rebalance_weights(values):
+            return np.array([
+                values[index_by_ticker[ticker]] if ticker in index_by_ticker else 0.0
+                for ticker in risk["tickers"]
+            ])
+
+        w_new, target_volatility = _fit_risk_target(
+            w_new, risk, _rebalance_weights, scipy_constraints,
+            [(float(min_weight[i]), issuer_cap_frac) for i in range(n)],
+        )
     targets = []
     for i, h in enumerate(holdings):
         delta = (w_new[i] - w_cur[i]) * aum
@@ -319,5 +570,13 @@ def optimize_rebalance(holdings, aum, issuer_cap_frac, turnover_frac=0.15):
         "expected_return_pre_pct": round(exp_pre * 100, 3),
         "expected_return_post_pct": round(exp_post * 100, 3),
         "turnover_budget_pct": round(turnover_frac * 100, 1),
+        "sector_drift_limit_pct": round(sector_drift_frac * 100, 1),
     }
+    if risk is not None:
+        meta["risk_constrained"] = risk_applied
+        meta["initial_risk_bound_applied"] = risk_applied
+        meta["sigma_max_annual"] = risk["sigma_max_annual"]
+        meta["target_volatility"] = risk.get("target_volatility", risk["sigma_max_annual"])
+        if target_volatility is not None:
+            meta["risk_target_achieved_annual"] = round(target_volatility, 4)
     return targets, meta

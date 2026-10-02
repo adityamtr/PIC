@@ -1,7 +1,7 @@
 import unittest
 from datetime import date
 
-from app import data, optimizer, policy, tax_lots, tax_rules
+from app import data, optimizer, planner, policy, tax_lots, tax_rules
 
 
 class TaxRulesTests(unittest.TestCase):
@@ -78,6 +78,18 @@ class TaxLotsTests(unittest.TestCase):
 
 
 class OptimizerTaxAwareTests(unittest.TestCase):
+    def test_sell_order_uses_holding_price_when_universe_quote_differs(self):
+        holding = {
+            "ticker": "HDFCBANK", "name": "HDFC Bank", "sector": "Financial Services",
+            "price": 731.0, "market_value": 100_000.0,
+        }
+        ds = {"holdings_by_ticker": {"HDFCBANK": holding}}
+
+        order = planner._order(ds, "HDFCBANK", "SELL", shares=100)
+
+        self.assertEqual(order["price"], 731.0)
+        self.assertEqual(order["est_value"], 73_100.0)
+
     def setUp(self):
         if not optimizer.available():
             self.skipTest("cvxpy not installed")
@@ -124,6 +136,85 @@ class OptimizerTaxAwareTests(unittest.TestCase):
         self.assertEqual(meta["status"], "optimal")
         self.assertIn("est_tax_cr", meta)
         self.assertGreaterEqual(meta["est_tax_cr"], 0.0)
+
+    def test_risk_target_fit_reaches_feasible_target(self):
+        covariance = optimizer.np.diag([0.04 / 12, 0.64 / 12])
+        risk = {"target_volatility": 0.5, "cov_monthly": covariance}
+        constraints = [{"type": "eq", "fun": lambda values: values.sum() - 1.0}]
+        fitted, achieved = optimizer._fit_risk_target(
+            optimizer.np.array([0.9, 0.1]), risk, lambda values: values,
+            constraints, [(0.0, 1.0), (0.0, 1.0)],
+        )
+        self.assertAlmostEqual(achieved, risk["target_volatility"], places=3)
+        self.assertAlmostEqual(float(fitted.sum()), 1.0, places=6)
+
+    def test_rebalance_tracks_target_within_trading_constraints(self):
+        crore = data.CRORE
+        holdings = [
+            {"ticker": "LOW", "price": 100.0, "market_value": 50 * crore,
+             "sellable_shares": 2_500_000, "expected_return": 0.10},
+            {"ticker": "HIGH", "price": 100.0, "market_value": 50 * crore,
+             "sellable_shares": 2_500_000, "expected_return": 0.01},
+        ]
+        risk = {
+            "tickers": ["LOW", "HIGH"],
+            "cov_monthly": optimizer.np.diag([0.04 / 12, 0.64 / 12]),
+            "sigma_max_annual": 0.5,
+            "target_volatility": 0.5,
+            "current_value_by_ticker": {"LOW": 50 * crore, "HIGH": 50 * crore},
+        }
+        targets, meta = optimizer.optimize_rebalance(
+            holdings, aum=100 * crore, issuer_cap_frac=0.9, turnover_frac=0.8, risk=risk,
+        )
+        self.assertAlmostEqual(meta["risk_target_achieved_annual"], 0.5, places=3)
+        self.assertLessEqual(sum(abs(target["delta_rupees"]) for target in targets), 80 * crore)
+
+    def test_rebalance_can_allocate_to_new_candidate(self):
+        crore = data.CRORE
+        holdings = [
+            {"ticker": "A", "price": 100.0, "market_value": 10 * crore,
+             "sellable_shares": 1_000_000, "expected_return": 0.03},
+            {"ticker": "B", "price": 100.0, "market_value": 10 * crore,
+             "sellable_shares": 1_000_000, "expected_return": -0.01},
+            {"ticker": "NEW", "price": 100.0, "market_value": 0.0,
+             "sellable_shares": 0, "expected_return": 0.20},
+        ]
+
+        targets, _ = optimizer.optimize_rebalance(
+            holdings, aum=20 * crore, issuer_cap_frac=0.5,
+        )
+        delta_by_ticker = {target["ticker"]: target["delta_rupees"] for target in targets}
+
+        self.assertGreater(delta_by_ticker["NEW"], 0.0)
+        self.assertAlmostEqual(sum(delta_by_ticker.values()), 0.0, delta=1.0)
+        self.assertLessEqual(sum(abs(value) for value in delta_by_ticker.values()), 3 * crore + 1.0)
+
+    def test_rebalance_limits_sector_weight_drift(self):
+        crore = data.CRORE
+        holdings = [
+            {"ticker": "OLDTECH", "sector": "Technology", "price": 100.0,
+             "market_value": 20 * crore, "sellable_shares": 2_000_000,
+             "expected_return": 0.01},
+            {"ticker": "OLDFIN", "sector": "Financials", "price": 100.0,
+             "market_value": 20 * crore, "sellable_shares": 2_000_000,
+             "expected_return": 0.01},
+            {"ticker": "NEWTECH", "sector": "Technology", "price": 100.0,
+             "market_value": 0.0, "sellable_shares": 0, "expected_return": 0.20},
+            {"ticker": "NEWFIN", "sector": "Financials", "price": 100.0,
+             "market_value": 0.0, "sellable_shares": 0, "expected_return": 0.10},
+        ]
+
+        targets, meta = optimizer.optimize_rebalance(
+            holdings, aum=100 * crore, issuer_cap_frac=0.5,
+        )
+        delta_by_ticker = {target["ticker"]: target["delta_rupees"] for target in targets}
+        for sector in ("Technology", "Financials"):
+            before = sum(h["market_value"] for h in holdings if h["sector"] == sector)
+            after = before + sum(
+                delta_by_ticker[h["ticker"]] for h in holdings if h["sector"] == sector
+            )
+            self.assertLessEqual(abs(after - before), 2 * crore + 1.0)
+        self.assertEqual(meta["sector_drift_limit_pct"], 2.0)
 
 
 class PolicyTaxChecksTests(unittest.TestCase):

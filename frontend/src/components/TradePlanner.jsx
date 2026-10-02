@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import {
   Accordion, AccordionDetails, AccordionSummary, Alert, Box, Button, Checkbox, Chip, CircularProgress, Divider, Grow,
-  FormControl, InputLabel, ListItemText, MenuItem, Select, Stack, Step, StepLabel,
+  FormControl, IconButton, InputLabel, ListItemText, MenuItem, Select, Stack, Step, StepLabel,
   Stepper, Table, TableBody, TableCell, TableHead, TableRow, TextField,
-  ToggleButton, ToggleButtonGroup,
+  ToggleButton, ToggleButtonGroup, Tooltip,
   Typography,
 } from '@mui/material'
 import CheckCircleIcon from '@mui/icons-material/CheckCircle'
@@ -15,6 +15,8 @@ import { api } from '../api'
 import { fmtCrValue, fmtNum, fmtPct, fmtRupee } from '../format'
 import { KpiGrid, Panel, ScrollX, Stat } from './ui'
 import PlanGenerationProgress from './PlanGenerationProgress'
+import RiskReturnPanel from './RiskReturnPanel'
+import RiskReturnComparison from './RiskReturnComparison'
 
 const toCr = (r) => r / 1e7
 const STEPS = ['PM Intent', 'Cash-Flow Planning', 'Trade Plan', 'Compliance & Risk', 'PIC Review']
@@ -344,6 +346,7 @@ export default function TradePlanner({ fundId }) {
   const [tradeDate, setTradeDate] = useState(() => dateOffset(0))
   const [settlementDate, setSettlementDate] = useState(() => dateOffset(2))
   const [method, setMethod] = useState('optimize')
+  const [targetVolatility, setTargetVolatility] = useState(null)
   const [plan, setPlan] = useState(null)
   const [busy, setBusy] = useState(false)
   const [progressEvents, setProgressEvents] = useState([])
@@ -378,6 +381,7 @@ export default function TradePlanner({ fundId }) {
     setPlan(null); setDecision(null)
     setManualSelections([])
     setManualSectorSelections([])
+    setTargetVolatility(null)
     api.sectorExposure(fundId)
       .then((d) => setFundSectors(d.sectors.map((s) => s.sector)))
       .catch(() => setFundSectors([]))
@@ -432,6 +436,7 @@ export default function TradePlanner({ fundId }) {
         horizon_days: horizon,
         method,
         fund_id: fundId,
+        target_volatility: targetVolatility ?? undefined,
       }
       const generatedPlan = await api.createTradePlanStream(payload, {
         onProgress: (evt) => setProgressEvents((prev) => [...prev, evt]),
@@ -440,6 +445,10 @@ export default function TradePlanner({ fundId }) {
     } catch (e) {
       setError(e.message)
     } finally { setBusy(false) }
+  }
+
+  function closePlan() {
+    setPlan(null); setDecision(null)
   }
 
   async function decide(choice) {
@@ -489,6 +498,18 @@ export default function TradePlanner({ fundId }) {
               : 'Heuristic drift/target rules pick the allocation.'}
           </Typography>
         </Stack>
+
+        <Box sx={{ mb: 2 }}>
+          <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600, mb: 0.5 }}>
+            Risk / return target
+          </Typography>
+          <RiskReturnPanel fundId={fundId} targetVolatility={targetVolatility}
+            onChangeTargetVolatility={(value) => {
+              setTargetVolatility(value)
+              setPlan(null)
+              setDecision(null)
+            }} afterPlan={plan?.risk_return} />
+        </Box>
 
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}
           alignItems={{ sm: 'flex-start' }} flexWrap="wrap">
@@ -644,6 +665,20 @@ export default function TradePlanner({ fundId }) {
       {plan && (
         <Grow in timeout={450}>
           <Stack spacing={2.5}>
+            {s.redemption_shortfall_cr > 0 && (
+              <Alert severity="warning" variant="outlined">
+                <strong>Redemption not fully funded:</strong> requested {fmtCrValue(s.redemption_requested_cr)};
+                planned sell orders raise {fmtCrValue(s.redemption_planned_cr)};
+                shortfall {fmtCrValue(s.redemption_shortfall_cr)}.
+              </Alert>
+            )}
+            <Stack direction="row" justifyContent="flex-end" sx={{ mb: -1.5 }}>
+              <Tooltip title="Close generated plan">
+                <IconButton size="small" onClick={closePlan} aria-label="Close generated plan">
+                  <CloseIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            </Stack>
             {/* Summary tiles — investable cash leads with an accent */}
             <KpiGrid min={190}>
               <Stat accent label="Investable Cash" value={fmtCrValue(toCr(s.investable_amount), 0)}
@@ -683,9 +718,40 @@ export default function TradePlanner({ fundId }) {
                 {opt.tax_saved_vs_naive_cr != null && opt.tax_saved_vs_naive_cr > 0 && (
                   <> · <strong>tax-aware saved {fmtCrValue(opt.tax_saved_vs_naive_cr)} vs a tax-blind plan</strong></>
                 )}
+                {opt.risk_target_achieved_annual != null && (
+                  <> · historical volatility target {fmtPct((opt.target_volatility ?? opt.sigma_max_annual) * 100)}
+                    → achieved {fmtPct(opt.risk_target_achieved_annual * 100)}</>
+                )}
+                {opt.initial_risk_bound_applied === false && (
+                  <> · initial convex risk bound was relaxed before target fitting</>
+                )}
+              </Alert>
+            )}
+            {plan.risk_return && (
+              <Alert severity={plan.risk_return.volatility_target_reached === false ? 'warning' : 'info'} variant="outlined">
+                <strong>Historical risk/return:</strong> annualized volatility {fmtPct((plan.risk_return.estimated_post_trade_annualized_volatility || 0) * 100)}
+                {plan.risk_return.target_volatility != null && <> vs target {fmtPct(plan.risk_return.target_volatility * 100)}</>}
+                {plan.risk_return.volatility_target_gap != null && (
+                  <> · target gap {fmtPct(plan.risk_return.volatility_target_gap * 100)}</>
+                )}
+                {plan.risk_return.estimated_post_trade_annualized_return != null && (
+                  <> · historical annualized return {fmtPct(plan.risk_return.estimated_post_trade_annualized_return * 100)}</>
+                )}
+                {plan.risk_return.historical_metric_coverage_pct != null && (
+                  <> · historical coverage {fmtPct(plan.risk_return.historical_metric_coverage_pct)}</>
+                )}
+                {plan.allocation_method !== 'optimize' && (
+                  <> · manual/rules allocations are not retuned to the risk target</>
+                )}
               </Alert>
             )}
             <AdditionalPlanNotes warnings={plan.warnings || []} riskFlags={plan.risk_flags || []} />
+
+            {plan.risk_return && (
+              <Panel title="Risk & Return: Before vs After Plan">
+                <RiskReturnComparison metrics={plan.risk_return} />
+              </Panel>
+            )}
 
             {/* Bento: the generated orders are the hero (wide, highlighted);
                 cash-flow + pending context ride a side rail. */}
@@ -834,6 +900,7 @@ export default function TradePlanner({ fundId }) {
                 The engine recommends; a PIC associate decides. Nothing executes without human approval.
               </Typography>
             </Panel>
+
           </Stack>
         </Grow>
       )}

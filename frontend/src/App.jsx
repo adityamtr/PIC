@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  AppBar, Box, Chip, Container, CssBaseline, Fade, IconButton, MenuItem, Select,
-  Tab, Tabs, ThemeProvider, Toolbar, Tooltip, Typography,
+  Alert, AppBar, Box, Chip, CircularProgress, Container, CssBaseline, Fade, IconButton, MenuItem, Select,
+  Snackbar, Tab, Tabs, ThemeProvider, Toolbar, Tooltip, Typography,
 } from '@mui/material'
 import DarkModeIcon from '@mui/icons-material/DarkModeOutlined'
 import LightModeIcon from '@mui/icons-material/LightModeOutlined'
+import RestartAltIcon from '@mui/icons-material/RestartAlt'
 import CircleIcon from '@mui/icons-material/Circle'
 import { buildTheme, BRAND_GRADIENT } from './theme'
 import { Logo } from './components/Logo'
@@ -20,6 +21,8 @@ export default function App() {
   const [apiUp, setApiUp] = useState(null)
   const [funds, setFunds] = useState([])
   const [fundId, setFundId] = useState('')
+  const [resetting, setResetting] = useState(false)
+  const [resetError, setResetError] = useState('')
 
   const theme = useMemo(() => buildTheme(mode), [mode])
 
@@ -33,6 +36,19 @@ export default function App() {
   }, [])
 
   const toggleMode = () => setMode((m) => (m === 'light' ? 'dark' : 'light'))
+
+  async function handleResetDb() {
+    if (!window.confirm('Reset the database to its freshly-seeded state? '
+      + 'This permanently deletes every generated plan and decision.')) return
+    setResetting(true); setResetError('')
+    try {
+      await api.resetDb()
+      window.location.reload()
+    } catch (e) {
+      setResetError(e.message)
+      setResetting(false)
+    }
+  }
 
   return (
     <ThemeProvider theme={theme}>
@@ -70,6 +86,13 @@ export default function App() {
               {mode === 'light' ? <DarkModeIcon /> : <LightModeIcon />}
             </IconButton>
           </Tooltip>
+          <Tooltip title="Reset database (reseed from source data)">
+            <span>
+              <IconButton onClick={handleResetDb} color="inherit" disabled={resetting}>
+                {resetting ? <CircularProgress size={20} color="inherit" /> : <RestartAltIcon />}
+              </IconButton>
+            </span>
+          </Tooltip>
         </Toolbar>
         <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ px: 2 }}
           textColor="primary" indicatorColor="primary">
@@ -82,20 +105,35 @@ export default function App() {
 
       <Container maxWidth="lg" sx={{ py: 3 }}>
         {fundId && (
-          <Fade in key={`${tab}-${fundId}`} timeout={350}>
-            <Box>
-              {tab === 0 && <TradePlanner fundId={fundId} />}
-              {tab === 1 && <Portfolio fundId={fundId} />}
-              {tab === 2 && <Trades fundId={fundId} />}
-              {tab === 3 && <PlanHistory fundId={fundId} />}
+          <>
+            {/* Trade Planner stays mounted (hidden via display:none rather than
+                unmounted) so a generated plan survives switching tabs and coming
+                back. The other tabs keep remounting per visit, since they rely
+                on that to refetch fresh data. */}
+            <Box sx={{ display: tab === 0 ? 'block' : 'none' }}>
+              <TradePlanner fundId={fundId} />
             </Box>
-          </Fade>
+            {tab !== 0 && (
+              <Fade in key={`${tab}-${fundId}`} timeout={350}>
+                <Box>
+                  {tab === 1 && <Portfolio fundId={fundId} />}
+                  {tab === 2 && <Trades fundId={fundId} />}
+                  {tab === 3 && <PlanHistory fundId={fundId} />}
+                </Box>
+              </Fade>
+            )}
+          </>
         )}
         <Typography variant="caption" color="text.secondary"
           sx={{ display: 'block', textAlign: 'center', mt: 5 }}>
           Synthetic data for demonstration only · Illustrative fund data · Not investment advice
         </Typography>
       </Container>
+      <Snackbar open={Boolean(resetError)} autoHideDuration={6000} onClose={() => setResetError('')}>
+        <Alert severity="error" variant="filled" onClose={() => setResetError('')}>
+          Database reset failed: {resetError}
+        </Alert>
+      </Snackbar>
     </ThemeProvider>
   )
 }

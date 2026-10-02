@@ -88,6 +88,7 @@ export const api = {
   fundExpense: (fundId) => get(`/fund-expense${qs(fundId)}`),
   lockIns: (fundId) => get(`/lock-ins${qs(fundId)}`),
   eventCalendar: (fundId) => get(`/event-calendar${qs(fundId)}`),
+  riskReturn: (fundId) => get(`/risk-return${qs(fundId)}`),
   createTradePlan: (intent) => post('/trade-plan', intent),
   // Streaming variant: emits real per-phase progress via `onProgress`, resolves
   // with the finished plan. Falls back to throwing on an `error` event.
@@ -116,4 +117,5 @@ export const api = {
   ),
   planSentEmails: (planId) => get(`/trade-plan/${encodeURIComponent(planId)}/emails`),
   decide: (planId, decision) => post(`/trade-plan/${planId}/decision`, decision),
+  resetDb: () => post('/admin/reset-db', {}),
 }
