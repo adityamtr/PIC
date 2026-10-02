@@ -520,11 +520,27 @@ def evaluate(ds: dict, orders: list[dict], cash_flow: dict, horizon_days: int,
     }
 
 
-def buy_exclusion_reason(ds: dict, ticker: str) -> str | None:
-    """Return a hard buy exclusion so automated allocators can avoid it."""
+def trade_block_reason(ds: dict, ticker: str) -> str | None:
+    """Return a hard trade exclusion so automated allocators can avoid it."""
     entity = _entity(ds, ticker)
     if entity["restricted"] or entity["pledged_shares"] > 0:
         return "restricted or encumbered security"
+    if entity.get("price_stale", False):
+        return "stale price"
+    if (entity.get("adv_cr") and entity.get("bid_ask_spread_pct") is not None
+            and entity["bid_ask_spread_pct"] > 1.0):
+        return "bid-ask spread exceeds the blocking threshold"
+    if entity.get("fx_exposure_pct", 0.0) > POLICY_DEFAULTS["foreign_currency_block_pct"]:
+        return "foreign-currency exposure exceeds the blocking threshold"
+    return None
+
+
+def buy_exclusion_reason(ds: dict, ticker: str) -> str | None:
+    """Return a hard buy exclusion so automated allocators can avoid it."""
+    reason = trade_block_reason(ds, ticker)
+    if reason:
+        return reason
+    entity = _entity(ds, ticker)
     if entity["esg_excluded"] or ticker in ESG_EXCLUSIONS:
         return entity.get("esg_exclusion_reason") or ESG_EXCLUSIONS.get(ticker, {}).get(
             "activity", "mandate-excluded ESG activity"

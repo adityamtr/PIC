@@ -63,6 +63,44 @@ _UNIT = 10_000_000  # 1 crore
 _OK = {"optimal", "optimal_inaccurate"}
 
 
+def _exposure_constraints(context, changes_by_ticker, limits):
+    """Build hard projected-exposure constraints in crore units."""
+    if not context:
+        return []
+
+    current = context.get("current_values_crore", {})
+    entities = context.get("entities", {})
+    aum = context["aum_crore"]
+    safety_margin = max(1e-6, 1e-8 * aum)  # solver-scale headroom in crore
+    constraints = []
+
+    dimensions = [("issuer", None), ("sector", "sector"), ("group", "group"),
+                  ("country", "country")]
+    for limit_name, entity_key in dimensions:
+        limit = limits.get(limit_name)
+        if limit is None:
+            continue
+        buckets = {}
+        tickers = set(current) | set(changes_by_ticker)
+        for ticker in tickers:
+            key = ticker if entity_key is None else entities.get(ticker, {}).get(entity_key)
+            if key is not None:
+                buckets.setdefault(key, []).append(ticker)
+        for key, tickers_in_bucket in buckets.items():
+            if not any(ticker in changes_by_ticker for ticker in tickers_in_bucket):
+                continue
+            base = sum(current.get(ticker, 0.0) for ticker in tickers_in_bucket)
+            change = sum((changes_by_ticker.get(ticker, 0.0) for ticker in tickers_in_bucket), 0.0)
+            bucket_limit = limit.get(key) if isinstance(limit, dict) else limit
+            if bucket_limit is None:
+                continue
+            hard_maximum = bucket_limit * aum
+            maximum = (base if base > hard_maximum
+                       else hard_maximum - safety_margin)
+            constraints.append(base + change <= maximum)
+    return constraints
+
+
 def _risk_constraint(weight_by_ticker: dict, risk: dict):
     """Build the initial convex ``w^T Sigma w <= target^2 / 12`` bound over
     whichever tickers the caller has a weight expression for. ``risk`` is the
@@ -134,7 +172,9 @@ def _solve_continuous(prob):
 # Buy: deploy `amount` to maximize expected return of deployed capital
 # --------------------------------------------------------------------------- #
 def optimize_buy(candidates, amount, aum, issuer_cap_frac, max_name_frac=0.34,
-                 sector_cap_frac=None, sector_current=None, cap_aum=None, risk=None):
+                 sector_cap_frac=None, sector_current=None, cap_aum=None, risk=None,
+                 exposure_context=None, group_cap_frac=None, country_cap_by_name=None,
+                 max_total_amount=None):
     """
     candidates: list of {ticker, price, current_value, expected_return, sector}
     amount:     rupees to deploy
@@ -149,7 +189,11 @@ def optimize_buy(candidates, amount, aum, issuer_cap_frac, max_name_frac=0.34,
                 post-trade portfolio volatility to risk["sigma_max_annual"]
                 (annualized) using a real monthly return covariance. Tickers
                 outside `candidates` keep their current (fixed) weight in the
-                constraint; relaxed before the sector cap if infeasible.
+                constraint; the risk preference may be relaxed, while context
+                exposure and cash limits remain hard constraints.
+    exposure_context: current holdings and issuer/sector/group/country metadata
+                used to enforce projected hard exposure limits.
+    max_total_amount: optional hard ceiling on total deployed cash.
     Returns (allocations, meta) where allocations = [{ticker, rupees}] for the
     names the optimizer chose to buy.
     """
@@ -181,11 +225,25 @@ def optimize_buy(candidates, amount, aum, issuer_cap_frac, max_name_frac=0.34,
             )
         risk_cons = _risk_constraint(weight_by_ticker, risk)
 
+    exposure_limits = {
+        "issuer": issuer_cap_frac,
+        "sector": sector_cap_frac,
+        "group": group_cap_frac,
+        "country": country_cap_by_name,
+    }
+
     def _build(with_name_cap, with_sector_cap, with_risk_cap):
-        cons = [cp.sum(buy) == amount_u, cur + buy <= issuer_cap_u]
+        cons = [cp.sum(buy) == amount_u]
+        if not exposure_context:
+            cons.append(cur + buy <= issuer_cap_u)
+        if max_total_amount is not None:
+            cons.append(cp.sum(buy) <= max_total_amount / _UNIT)
+        if exposure_context:
+            changes = {candidate["ticker"]: buy[i] for i, candidate in enumerate(candidates)}
+            cons.extend(_exposure_constraints(exposure_context, changes, exposure_limits))
         if with_name_cap:
             cons.append(buy <= max_name_frac * amount_u)
-        if with_sector_cap and sector_cap_frac:
+        if with_sector_cap and sector_cap_frac and not exposure_context:
             sector_cap_u = sector_cap_frac * cap_basis / _UNIT
             for s in sorted({x for x in sectors if x is not None}):
                 idx = [i for i, x in enumerate(sectors) if x == s]
@@ -224,7 +282,7 @@ def optimize_buy(candidates, amount, aum, issuer_cap_frac, max_name_frac=0.34,
 
     raw_rupees = np.clip(np.asarray(buy.value).flatten(), 0.0, None) * _UNIT
     target_volatility = None
-    if risk:
+    if risk and not exposure_context and max_total_amount is None:
         initial = raw_rupees / (_UNIT * amount_u)
         scipy_constraints = [
             {"type": "eq", "fun": lambda values: float(np.sum(values) - 1.0)},
@@ -261,7 +319,8 @@ def optimize_buy(candidates, amount, aum, issuer_cap_frac, max_name_frac=0.34,
     for i, c in enumerate(candidates):
         shares = int(raw_rupees[i] // price[i]) if price[i] else 0
         if shares > 0:
-            allocations.append({"ticker": c["ticker"], "rupees": raw_rupees[i], "shares": shares})
+            allocations.append({"ticker": c["ticker"], "price": price[i],
+                                "rupees": raw_rupees[i], "shares": shares})
 
     deployed = float(ret @ raw_rupees)
     meta = {
@@ -283,7 +342,9 @@ def optimize_buy(candidates, amount, aum, issuer_cap_frac, max_name_frac=0.34,
 # --------------------------------------------------------------------------- #
 # Sell: raise `amount` by selling the lowest expected-return names (removal)
 # --------------------------------------------------------------------------- #
-def optimize_sell(candidates, amount, max_name_frac=0.34, horizon_days=None, risk=None, aum=None):
+def optimize_sell(candidates, amount, max_name_frac=0.34, horizon_days=None, risk=None, aum=None,
+                  exposure_context=None, issuer_cap_frac=None, sector_cap_frac=None,
+                  group_cap_frac=None, country_cap_by_name=None):
     """
     candidates: list of {ticker, price, sellable_shares, expected_return,
                          tax_rate?, txn_rate?}
@@ -338,8 +399,18 @@ def optimize_sell(candidates, amount, max_name_frac=0.34, horizon_days=None, ris
             )
         risk_cons = _risk_constraint(weight_by_ticker, risk)
 
+    exposure_limits = {
+        "issuer": issuer_cap_frac,
+        "sector": sector_cap_frac,
+        "group": group_cap_frac,
+        "country": country_cap_by_name,
+    }
+
     def _build(with_name_cap, with_risk_cap, coeff):
         cons = [val <= sellable_u, cp.sum(val) == target_u]
+        if exposure_context:
+            changes = {candidate["ticker"]: -val[i] for i, candidate in enumerate(live)}
+            cons.extend(_exposure_constraints(exposure_context, changes, exposure_limits))
         if with_name_cap:
             # Spread the raise so no single name funds most of it (market impact).
             cons.append(val <= max_name_frac * target_u)
@@ -367,7 +438,7 @@ def optimize_sell(candidates, amount, max_name_frac=0.34, horizon_days=None, ris
             raise OptimizationFailed(f"sell optimization status: {status}")
         values = np.clip(np.asarray(val.value).flatten(), 0.0, None) * _UNIT
         target_volatility = None
-        if risk:
+        if risk and not exposure_context:
             initial = values / (target_u * _UNIT)
             scipy_constraints = [{"type": "eq", "fun": lambda fractions: float(np.sum(fractions) - 1.0)}]
             bounds = [
@@ -410,7 +481,7 @@ def optimize_sell(candidates, amount, max_name_frac=0.34, horizon_days=None, ris
         shares = int(val_rupees[i] // price[i])
         if shares > 0:
             value = shares * price[i]
-            sells.append({"ticker": c["ticker"], "shares": shares})
+            sells.append({"ticker": c["ticker"], "price": price[i], "shares": shares})
             given_up += ret[i] * value
             est_tax += tax[i] * value
             est_txn += txn[i] * value
@@ -446,7 +517,8 @@ def optimize_sell(candidates, amount, max_name_frac=0.34, horizon_days=None, ris
 # Rebalance: retilt the whole book toward higher expected return
 # --------------------------------------------------------------------------- #
 def optimize_rebalance(holdings, aum, issuer_cap_frac, turnover_frac=0.15, risk=None,
-                       sector_drift_frac=0.02):
+                       sector_drift_frac=0.02, exposure_context=None, sector_cap_frac=None,
+                       group_cap_frac=None, country_cap_by_name=None):
     """
     holdings: the fund's holdings (each has market_value, price, sellable_shares,
               expected_return).
@@ -496,9 +568,25 @@ def optimize_rebalance(holdings, aum, issuer_cap_frac, turnover_frac=0.15, risk=
     base_cons = [
         cp.sum(w) == invested,        # stay as invested as we are now (cash-neutral)
         w >= min_weight,              # long-only; do not sell locked shares
-        w <= issuer_cap_frac,         # per-issuer cap
         cp.norm1(w - w_cur) <= turnover_frac,   # limit churn
     ]
+    if not exposure_context:
+        base_cons.append(w <= issuer_cap_frac)
+    else:
+        current_values_crore = exposure_context.get("current_values_crore", {})
+        changes = {
+            holding["ticker"]: w[i] * (aum / _UNIT)
+            - current_values_crore.get(holding["ticker"], 0.0)
+            for i, holding in enumerate(holdings)
+        }
+        base_cons.extend(_exposure_constraints(
+            exposure_context, changes,
+            {"issuer": issuer_cap_frac, "sector": sector_cap_frac, "group": group_cap_frac,
+             "country": country_cap_by_name},
+        ))
+    blocked_buys = [i for i, holding in enumerate(holdings) if holding.get("buy_blocked")]
+    for i in blocked_buys:
+        base_cons.append(w[i] <= w_cur[i])
     for sector, indices in sector_indices.items():
         current_weight = current_sector_weights[sector]
         sector_weight = cp.sum(w[indices])
@@ -529,7 +617,7 @@ def optimize_rebalance(holdings, aum, issuer_cap_frac, turnover_frac=0.15, risk=
 
     w_new = np.asarray(w.value).flatten()
     target_volatility = None
-    if risk:
+    if risk and not exposure_context:
         index_by_ticker = {holding["ticker"]: i for i, holding in enumerate(holdings)}
         scipy_constraints = [
             {"type": "eq", "fun": lambda values: float(np.sum(values) - invested)},

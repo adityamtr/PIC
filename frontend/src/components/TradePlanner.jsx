@@ -72,7 +72,7 @@ const PRESETS = [
   { label: 'Increase IT + Healthcare ₹80 Cr', action: 'increase', targets: ['Information Technology', 'Healthcare'], amount_cr: 80 },
 ]
 
-const sevOf = (s) => (s === 'FAIL' || s === 'BREACH' || s === 'HIGH' || s === 'BLOCK' ? 'error'
+const sevOf = (s) => (s === 'FAIL' || s === 'BREACH' || s === 'HIGH' || s === 'BLOCK' || s === 'BLOCKED' ? 'error'
   : s === 'WARN' || s === 'MEDIUM' || s === 'ESCALATE' ? 'warning' : 'success')
 
 const fmtRet = (r) => (r == null ? '—' : `${(r * 100).toFixed(2)}%`)
@@ -459,6 +459,26 @@ export default function TradePlanner({ fundId }) {
   }
 
   const s = plan?.summary
+  const planGateStatus = s?.plan_gate_status
+    ?? (!plan?.execution_allowed
+      ? (plan?.policy_status === 'ESCALATE' ? 'ESCALATE' : 'BLOCKED')
+      : s?.compliance_status)
+  const policyBlocks = (plan?.policy_checks || []).filter((check) => check.status === 'BLOCK')
+  const blockedEntities = new Set(policyBlocks.map((check) => check.entity))
+  const blockReasons = [
+    ...policyBlocks.map((check) => ({
+      key: `policy-${check.code}-${check.entity}`,
+      label: `${check.code}${check.entity ? ` · ${check.entity}` : ''}`,
+      message: check.message,
+    })),
+    ...(plan?.compliance_checks || [])
+      .filter((check) => check.status === 'FAIL' && !blockedEntities.has(check.entity))
+      .map((check) => ({
+        key: `compliance-${check.code}-${check.entity}`,
+        label: `${check.rule}${check.entity ? ` · ${check.entity}` : ''}`,
+        message: check.message,
+      })),
+  ]
   const activePhaseIndex = progressEvents.length ? progressEvents[progressEvents.length - 1].index : 0
   const activeStep = plan ? 4 : busy ? Math.min(4, activePhaseIndex) : 0
   const orderTickers = new Set((plan?.orders || []).map((o) => o.ticker))
@@ -688,8 +708,8 @@ export default function TradePlanner({ fundId }) {
               <Stat label="Net Cash Impact" value={fmtCrValue(toCr(s.net_cash_impact), 0)}
                 sub={`${s.net_cash_impact < 0 ? 'cash deployed' : 'cash raised'} · ${fmtCrValue(toCr(s.net_cash_after_tax), 0)} after tax`}
                 color={s.net_cash_impact < 0 ? 'error.main' : 'success.main'} />
-              <Stat label="Compliance" value={<Chip label={s.compliance_status} color={sevOf(s.compliance_status)} size="small" />}
-                sub={decision ? decision.status : plan.status} />
+              <Stat label="Plan Gate" value={<Chip label={planGateStatus} color={sevOf(planGateStatus)} size="small" />}
+                sub={`Compliance ${s.compliance_status} · policy ${plan.policy_status}`} />
               {s.total_sell_value > 0 && (
                 <Stat label="Est. Exit Tax" value={fmtCrValue(toCr(s.est_total_tax), 2)}
                   sub={`${s.tax_drag_bps} bps drag · ${s.stcg_share_pct}% STCG`}
@@ -707,7 +727,20 @@ export default function TradePlanner({ fundId }) {
               )}
             </Stack>
 
-            <Alert severity={sevOf(s.compliance_status)} variant="outlined">{plan.recommendation}</Alert>
+            <Alert severity={sevOf(planGateStatus)} variant="outlined">
+              <Typography variant="body2">{plan.recommendation}</Typography>
+              {planGateStatus === 'BLOCKED' && blockReasons.length > 0 && (
+                <Box component="ul" sx={{ mt: 1, mb: 0, pl: 2.5 }}>
+                  {blockReasons.map((reason) => (
+                    <li key={reason.key}>
+                      <Typography variant="body2">
+                        <strong>{reason.label}:</strong> {reason.message}
+                      </Typography>
+                    </li>
+                  ))}
+                </Box>
+              )}
+            </Alert>
             {opt && (
               <Alert severity="info" variant="outlined">
                 <strong>Optimizer:</strong> {opt.objective} · solver {opt.solver} ({opt.status})

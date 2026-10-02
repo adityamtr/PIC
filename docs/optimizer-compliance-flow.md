@@ -86,19 +86,22 @@ The optimizer tries to invest the requested amount in names with the highest exp
 
 - Never proposing a negative buy.
 - Allocating the full requested amount in its mathematical solution.
-- Keeping each company's existing holding plus the proposed buy within the fund's company limit.
-- Keeping each sector within the fund's sector limit.
+- Keeping projected issuer, sector, group, and country exposure within their hard limits. An inherited breach may remain unchanged within the policy's 0.01 percentage-point tolerance.
+- Keeping total buys within the policy cash budget. ADV participation thresholds are warning/escalation checks, not `BLOCK` thresholds, so they do not make a requested allocation infeasible.
+- Excluding securities whose trade would be blocked for restriction, ESG exclusion, stale price, excessive spread, or foreign-currency exposure.
 - Initially putting no more than 34% of the requested amount into any one name.
 
-**Example:** for a ₹100 Cr buy, the first attempt puts at most ₹34 Cr into any one name. If that restriction makes a solution impossible, the optimizer removes that per-name limit and tries again. It still keeps the company and sector limits. If it still cannot find a solution, it removes the optimizer's sector limit and tries once more; the company limit remains. The separate policy review still checks sector exposure afterward.
+**Example:** for a ₹100 Cr buy, the first attempt puts at most ₹34 Cr into any one name. If that diversification restriction makes a solution impossible, the optimizer removes only that per-name limit and retries. The issuer, sector, group, country, and cash limits remain hard constraints. If they make the requested allocation infeasible, the planner falls back to its rule-based path and the final policy review can block the resulting plan. ADV participation is evaluated after the solve because its thresholds warn or escalate rather than block.
 
-For a contribution, the company and sector percentages are measured against the fund's existing assets plus the new contribution. For other buys, they are measured against current assets.
+For a contribution, exposure percentages are measured against the fund's existing assets plus the new contribution. Other buys use the current AUM as a conservative constraint basis.
 
 ### When the plan sells shares
 
 The optimizer tries to raise the requested cash by selling names with lower forecast returns first, to give up less forecast return. It:
 
 - Uses only shares marked available to sell.
+- Preserves the configured minimum holding and accounts for pending sells.
+- Keeps projected issuer, sector, group, and country exposure within hard limits.
 - Cannot raise more than the total value of those available shares.
 - Initially limits any one name to 34% of the requested cash target.
 - Removes only that 34% per-name limit if no solution can be found; available-share limits remain.
@@ -111,14 +114,15 @@ The rebalance optimizer tries to increase weights in names with higher forecast 
 
 - Does not short securities: weights cannot go below zero.
 - Keeps the total invested amount unchanged, so it is cash-neutral before share rounding.
-- Uses a generic 10% maximum weight for each company.
+- Uses the active fund's issuer, sector, group, and country limits.
+- Prevents buys in securities blocked by hard trade eligibility rules.
 - Limits the sum of absolute weight changes to 15% of fund assets. In plain terms, the combined size of all increases and decreases is limited to 15 percentage points of assets.
 
-The rebalance's 10% company limit is generic. It does not use the SBI Nifty 50 ETF's configured 13% limit. After optimization, planner code ignores rebalance changes below ₹0.25 Cr and caps each sale at shares available to sell.
+After optimization, planner code ignores rebalance changes below ₹0.25 Cr and caps each sale at shares available to sell.
 
 ## 2. Rules Checked After Trades Are Proposed
 
-These rules run **after** buys and sells have been chosen. Exposure is recalculated using the proposed portfolio and its post-trade asset value.
+The optimizer enforces the hard allocation constraints above. These policy checks still run **after** orders are built, including for rule-based or manual plans, and to catch differences from whole-share rounding or order construction. Warning and escalation bands, including ADV participation, are not optimization constraints: they may still flag a plan for review after the solve.
 
 For company, sector, group, and country limits:
 
@@ -166,10 +170,10 @@ Regardless of outcome, the system returns the proposed orders, checks, risk note
 
 ## Why Optimizer and Policy Can Disagree
 
-- The optimizer is a way to construct a proposed allocation, not the final approval authority. For buys, it can relax its sector cap after an infeasible solve; post-order policy then checks the configured sector limit independently.
-- Buy-candidate filtering is incomplete for names already held: held securities are added to optimizer candidates before the exclusion filter used for new universe names. A restricted, pledged, or ESG-excluded existing holding can therefore be proposed as a new buy; the post-order policy checks should block it.
-- Optimized rebalance uses a generic 10% company limit, which can differ from the fund-specific limit used by buy optimization and policy.
+- The optimizer is a way to construct a proposed allocation, not the final approval authority. Hard-limit infeasibility can trigger the rule-based fallback, and the resulting orders still go through policy checks.
 - The active data labels each holding's business group with its ticker, so the configured group limit does not currently combine affiliated companies.
+- Whole-share rounding, minimum rebalance ticket sizes, and execution order construction can change the projected portfolio after the continuous solve.
+- The exact 5/40 rule is not represented as a convex constraint: it depends on counting only positions that individually exceed 5%. The post-order check remains authoritative for that rule.
 - The expected returns are fixed illustrative values in `backend/app/forecast.py`, not live TFT predictions. The optimizer's ranking is therefore a demo input.
 
 ## Code Locations

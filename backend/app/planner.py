@@ -26,11 +26,6 @@ from . import data, data_v2, db, forecast, optimizer, policy, risk_model, tax_lo
 
 CRORE = data.CRORE
 
-# Per-issuer cap (fraction of AUM) the convex optimizer respects up-front, so its
-# proposals arrive already inside the SEBI single-issuer limit that the
-# compliance rules re-check afterwards.
-_ISSUER_CAP_FRAC = data.COMPLIANCE_LIMITS["single_issuer_limit"] / 100
-
 # Square-root market-impact heuristic: estimated cost (bps) = coefficient *
 # sqrt(participation), participation = order value / effective ADV. This is a
 # standard first-order approximation for how much trading against a stock's own
@@ -57,6 +52,9 @@ _SECTOR_ALIASES = {
     "automobile": "Automobile", "healthcare": "Healthcare", "pharma": "Healthcare",
 }
 
+    # This function generates orders based on user selections
+    # It takes into account the user's input for the securities to be traded
+    # and the amount to be allocated for each trade.
 
 def resolve_sector(target):
     if not target:
@@ -97,10 +95,11 @@ def _sector_for(ds, ticker):
     return h["sector"] if h else "Unknown"
 
 
-def _order(ds, ticker, side, rupees=None, shares=None):
+def _order(ds, ticker, side, rupees=None, shares=None, price_override=None):
     holding = data.holding(ds, ticker) if side == "SELL" else None
     holding_price = holding.get("price") if holding else None
-    price = holding_price if _usable_price(holding_price) else _price_for(ds, ticker)
+    price = (price_override if _usable_price(price_override)
+             else holding_price if _usable_price(holding_price) else _price_for(ds, ticker))
     if shares is None:
         shares = int(rupees // price) if price else 0
     return {
@@ -805,10 +804,14 @@ def _buy_candidates(ds, sectors, returns):
     for h in ds["holdings"]:
         if sectors and h["sector"] not in sectors:
             continue
+        if policy.buy_exclusion_reason(ds, h["ticker"]) is not None:
+            continue
         if not _usable_price(h["price"]):
             continue
         seen.add(h["ticker"])
-        out.append({"ticker": h["ticker"], "price": h["price"], "sector": h["sector"],
+        entity = policy._entity(ds, h["ticker"])
+        out.append({"ticker": h["ticker"], "price": h["price"], "sector": entity["sector"],
+                    "group": entity["group"], "country": entity["country"],
                     "current_value": h["market_value"], "expected_return": returns.get(h["ticker"], 0.0)})
     for u in data.UNIVERSE:
         if u["ticker"] in seen:
@@ -818,24 +821,75 @@ def _buy_candidates(ds, sectors, returns):
         if sectors and u["sector"] not in sectors:
             continue
         held = data.holding(ds, u["ticker"])
-        out.append({"ticker": u["ticker"], "price": u["price"], "sector": u["sector"],
+        entity = policy._entity(ds, u["ticker"])
+        out.append({"ticker": u["ticker"], "price": u["price"], "sector": entity["sector"],
+                    "group": entity["group"], "country": entity["country"],
                     "current_value": held["market_value"] if held else 0.0,
                     "expected_return": returns.get(u["ticker"], 0.0)})
     return out
 
 
+def _optimizer_exposure_context(ds, aum_basis=None):
+    entities = {}
+    current_values = {}
+    tickers = {holding["ticker"] for holding in ds["holdings"]}
+    tickers.update(item["ticker"] for item in data.UNIVERSE)
+    for ticker in tickers:
+        entity = policy._entity(ds, ticker)
+        entities[ticker] = {key: entity[key] for key in ("sector", "group", "country")}
+    for holding in ds["holdings"]:
+        current_values[holding["ticker"]] = holding["market_value"] / CRORE
+
+    home_country = ds.get("fund", {}).get("domicile_country", "India")
+    emerging_countries = {
+        policy._entity(ds, holding["ticker"])["country"]
+        for holding in ds["holdings"]
+        if policy._entity(ds, holding["ticker"])["emerging_market"]
+    }
+    country_caps = {}
+    for entity in entities.values():
+        country = entity["country"]
+        if country in country_caps:
+            continue
+        if country == home_country:
+            country_caps[country] = policy.POLICY_DEFAULTS["home_country_limit_pct"] / 100
+        elif country in emerging_countries:
+            country_caps[country] = policy.POLICY_DEFAULTS["emerging_country_limit_pct"] / 100
+        else:
+            country_caps[country] = policy.POLICY_DEFAULTS["country_limit_pct"] / 100
+
+    return {
+        "entities": entities,
+        "current_values_crore": current_values,
+        "aum_crore": (aum_basis if aum_basis is not None else ds["aum"]) / CRORE,
+        "country_cap_by_name": country_caps,
+    }
+
+
 def _sell_candidates(ds, sectors, returns):
-    return [{"ticker": h["ticker"], "price": h["price"],
-             "sellable_shares": _available_sellable_shares(ds, h),
-             "expected_return": returns.get(h["ticker"], 0.0),
-             # Exit tax (blended STCG/LTCG over the synthetic lots; negative for
-             # loss positions) and transaction cost, per rupee of proceeds.
-             "tax_rate": (h.get("effective_tax_rate_pct") or 0.0) / 100,
-             "txn_rate": (h.get("txn_cost_rate_pct") or 0.0) / 100}
-            for h in ds["holdings"]
-            if (not sectors or h["sector"] in sectors)
-            and _available_sellable_shares(ds, h) > 0
-            and _usable_price(h["price"])]
+    candidates = []
+    for holding in ds["holdings"]:
+        if (sectors and holding["sector"] not in sectors) or not _usable_price(holding["price"]):
+            continue
+        if policy.trade_block_reason(ds, holding["ticker"]) is not None:
+            continue
+        entity = policy._entity(ds, holding["ticker"])
+        held_shares = holding.get("shares", holding.get("sellable_shares", 0)
+                                  + holding.get("locked_shares", 0))
+        max_sell = min(
+            _available_sellable_shares(ds, holding),
+            max(held_shares - entity["minimum_holding_shares"], 0),
+        )
+        if max_sell <= 0:
+            continue
+        candidates.append({
+            "ticker": holding["ticker"], "price": holding["price"],
+            "sellable_shares": max_sell,
+            "expected_return": returns.get(holding["ticker"], 0.0),
+            "tax_rate": (holding.get("effective_tax_rate_pct") or 0.0) / 100,
+            "txn_rate": (holding.get("txn_cost_rate_pct") or 0.0) / 100,
+        })
+    return candidates
 
 
 def _historical_stock_context(ds):
@@ -976,7 +1030,7 @@ def _estimate_post_trade_risk_return(ds, orders, target_volatility, action, amou
 
 
 def _orders_by_optimizer(ds, action, sectors, amount, investable, returns, horizon_days=None,
-                         target_volatility=None):
+                         target_volatility=None, cash_flow=None):
     """Forecast-driven order generation. Returns the usual tuple plus an
     optimization-meta dict. Raises on solver problems so the caller can fall
     back to the rule-based path."""
@@ -984,6 +1038,7 @@ def _orders_by_optimizer(ds, action, sectors, amount, investable, returns, horiz
     opt_meta = None
     aum = ds["aum"]
     risk_ctx = _build_risk_context(ds, target_volatility)
+    lim = policy._limits(ds)
 
     if action in ("contribution", "increase", "buy", "add"):
         if action != "contribution" and not sectors:
@@ -993,18 +1048,27 @@ def _orders_by_optimizer(ds, action, sectors, amount, investable, returns, horiz
         # Respect the fund's own mandate caps as hard optimizer constraints, and
         # measure them against the post-trade AUM (a contribution grows AUM by
         # the deployed cash) so the optimizer never proposes a breaching book.
-        lim = (data_v2.get_fund_compliance_limits(ds["id"])
-               if ds["id"] in data_v2.FUNDS_V2 else data.COMPLIANCE_LIMITS)
         cap_aum = aum + amount if action == "contribution" else aum
+        exposure_context = _optimizer_exposure_context(ds, cap_aum)
+        country_caps = exposure_context["country_cap_by_name"]
+        cash_flow = cash_flow or {"investable_amount": investable}
+        subscription = cash_flow.get("subscription_amount", 0.0)
+        max_cash = (max(investable - subscription, 0.0)
+                * policy.POLICY_DEFAULTS["max_cash_usage_ratio"] + subscription)
         sector_current = {}
         for h in ds["holdings"]:
             sector_current[h["sector"]] = sector_current.get(h["sector"], 0.0) + h["market_value"]
         allocations, opt_meta = optimizer.optimize_buy(
             candidates, amount, aum, lim["single_issuer_limit"] / 100,
             sector_cap_frac=lim["sector_soft_limit"] / 100,
-            sector_current=sector_current, cap_aum=cap_aum, risk=risk_ctx)
+            sector_current=sector_current, cap_aum=cap_aum, risk=risk_ctx,
+            exposure_context=exposure_context,
+            group_cap_frac=lim["group_limit"] / 100,
+            country_cap_by_name=country_caps,
+            max_total_amount=max_cash)
         for a in allocations:
-            orders.append({**_order(ds, a["ticker"], "BUY", shares=a["shares"]),
+            orders.append({**_order(ds, a["ticker"], "BUY", shares=a["shares"],
+                                    price_override=a["price"]),
                            "reason": "Convex-optimized to maximize forecast return"})
         buy_total = sum(o["est_value"] for o in orders)
         if action == "contribution":
@@ -1026,10 +1090,17 @@ def _orders_by_optimizer(ds, action, sectors, amount, investable, returns, horiz
     elif action in ("redemption", "decrease", "sell", "trim", "raise_cash"):
         sec = sectors if action in ("decrease", "sell", "trim") else None
         candidates = _sell_candidates(ds, sec, returns)
+        exposure_context = _optimizer_exposure_context(ds, max(aum - amount, CRORE))
         sells, opt_meta = optimizer.optimize_sell(candidates, amount, horizon_days=horizon_days,
-                                                   risk=risk_ctx, aum=aum)
+                               risk=risk_ctx, aum=aum,
+                               exposure_context=exposure_context,
+                               issuer_cap_frac=lim["single_issuer_limit"] / 100,
+                               sector_cap_frac=lim["sector_soft_limit"] / 100,
+                               group_cap_frac=lim["group_limit"] / 100,
+                               country_cap_by_name=exposure_context["country_cap_by_name"])
         for sdict in sells:
-            orders.append({**_order(ds, sdict["ticker"], "SELL", shares=sdict["shares"]),
+            orders.append({**_order(ds, sdict["ticker"], "SELL", shares=sdict["shares"],
+                                    price_override=sdict["price"]),
                            "reason": "Convex-optimized to minimize forecast return given up + exit tax"})
         raised = sum(o["est_value"] for o in orders if o["side"] == "SELL")
         if action == "redemption":
@@ -1039,9 +1110,18 @@ def _orders_by_optimizer(ds, action, sectors, amount, investable, returns, horiz
 
     elif action == "rebalance":
         existing_by_ticker = {h["ticker"]: h for h in ds["holdings"]}
+        exposure_context = _optimizer_exposure_context(ds)
+        sellable_by_ticker = {
+            candidate["ticker"]: candidate["sellable_shares"]
+            for candidate in _sell_candidates(ds, None, returns)
+        }
         holdings = [
-            {**h, "sellable_shares": _available_sellable_shares(ds, h),
-             "expected_return": returns.get(h["ticker"], 0.0)}
+            {**h,
+             "sellable_shares": sellable_by_ticker.get(h["ticker"], 0),
+             "expected_return": returns.get(h["ticker"], 0.0),
+             "group": exposure_context["entities"][h["ticker"]]["group"],
+             "country": exposure_context["entities"][h["ticker"]]["country"],
+             "buy_blocked": policy.buy_exclusion_reason(ds, h["ticker"]) is not None}
             for h in ds["holdings"]
         ]
         for candidate in _buy_candidates(ds, None, returns):
@@ -1049,11 +1129,18 @@ def _orders_by_optimizer(ds, action, sectors, amount, investable, returns, horiz
                 continue
             holdings.append({
                 "ticker": candidate["ticker"], "price": candidate["price"],
+                "sector": candidate["sector"], "group": candidate["group"],
+                "country": candidate["country"],
                 "market_value": 0.0, "sellable_shares": 0,
                 "expected_return": candidate["expected_return"],
                 "effective_tax_rate_pct": 0.0, "txn_cost_rate_pct": 0.0,
             })
-        targets, opt_meta = optimizer.optimize_rebalance(holdings, aum, _ISSUER_CAP_FRAC, risk=risk_ctx)
+        targets, opt_meta = optimizer.optimize_rebalance(
+            holdings, aum, lim["single_issuer_limit"] / 100, risk=risk_ctx,
+            exposure_context=exposure_context,
+            sector_cap_frac=lim["sector_soft_limit"] / 100,
+            group_cap_frac=lim["group_limit"] / 100,
+            country_cap_by_name=exposure_context["country_cap_by_name"])
         min_ticket = 0.25 * CRORE
         rebalance_by_ticker = {h["ticker"]: h for h in holdings}
         for t in targets:
@@ -1066,13 +1153,15 @@ def _orders_by_optimizer(ds, action, sectors, amount, investable, returns, horiz
             if delta > 0:
                 shares = int(delta // candidate["price"])
                 if shares > 0:
-                    orders.append({**_order(ds, ticker, "BUY", shares=shares),
+                    orders.append({**_order(ds, ticker, "BUY", shares=shares,
+                                            price_override=candidate["price"]),
                                    "reason": "Convex rebalance toward higher forecast return"})
             elif h:
                 sellable_value = _available_sellable_shares(ds, h) * h["price"]
                 shares = int(min(-delta, sellable_value) // h["price"])
                 if shares > 0:
-                    orders.append({**_order(ds, ticker, "SELL", shares=shares),
+                    orders.append({**_order(ds, ticker, "SELL", shares=shares,
+                                            price_override=candidate["price"]),
                                    "reason": "Convex rebalance toward higher forecast return"})
     else:
         warnings.append(f"Unknown action '{action}'.")
@@ -1152,6 +1241,16 @@ def _cr(amount):
     return round((amount or 0) / CRORE, 2)
 
 
+def _plan_gate_status(compliance_failed, policy_status, has_warn):
+    if compliance_failed or policy_status == "BLOCK":
+        return "BLOCKED"
+    if policy_status == "ESCALATE":
+        return "ESCALATE"
+    if has_warn or policy_status == "WARN":
+        return "WARN"
+    return "PASS"
+
+
 def _step(phase, phase_index, step, label, detail, data=None):
     """Build one granular progress event belonging to a phase."""
     return {
@@ -1187,6 +1286,7 @@ def iter_plan_steps(fund_id, intent):
     # the cached dict's "pending_trades" key, which permanently baked that
     # moment's approved-plan trades into the shared cache and caused them to be
     # re-added — duplicated — on every later read).
+    policy.refresh_policy_from_db()
     ds = dict(_get_ds(fund_id))
     # Augment static pending trades with orders from approved plans so this plan
     # sees the full commitment picture (reduced investable cash, reduced
@@ -1325,7 +1425,7 @@ def iter_plan_steps(fund_id, intent):
             try:
                 orders, funding_sources, risk_notes, warnings, opt_meta = _orders_by_optimizer(
                     ds, action, sectors, amount, investable, returns, horizon,
-                    target_volatility=intent.get("target_volatility"))
+                    target_volatility=intent.get("target_volatility"), cash_flow=cfp)
             except Exception as exc:  # solver / feasibility issue -> fall back
                 method_used = "rules"
                 orders, funding_sources, risk_notes, warnings = _orders_by_rules(
@@ -1460,16 +1560,15 @@ def iter_plan_steps(fund_id, intent):
     )
 
     has_fail = any(c["status"] == "FAIL" for c in compliance)
-    has_policy_block = policy_result["status"] == "BLOCK"
-    has_policy_escalation = policy_result["status"] == "ESCALATE"
     has_warn = (any(c["status"] == "WARN" for c in compliance)
                 or any(r["severity"] == "HIGH" for r in risks)
                 or policy_result["status"] == "WARN")
-    if has_fail or has_policy_block:
+    plan_gate_status = _plan_gate_status(has_fail, policy_result["status"], has_warn)
+    if plan_gate_status == "BLOCKED":
         recommendation = "Plan is blocked by one or more policy or compliance limits. Recommend MODIFY or ESCALATE before execution."
-    elif has_policy_escalation:
+    elif plan_gate_status == "ESCALATE":
         recommendation = "Plan requires Compliance/PIC escalation because mandatory policy data or review is incomplete."
-    elif has_warn:
+    elif plan_gate_status == "WARN":
         recommendation = "Plan is executable but has items near limits / elevated execution risk. Recommend REVIEW carefully, then APPROVE with monitoring."
     else:
         recommendation = "Plan is within all limits with low execution risk. Recommend APPROVE for execution."
@@ -1521,6 +1620,7 @@ def iter_plan_steps(fund_id, intent):
             "est_total_impact_cost": round(total_impact_cost, 0),
             "est_total_impact_cost_cr": round(total_impact_cost / CRORE, 4),
             "est_weighted_impact_bps": weighted_impact_bps,
+            "plan_gate_status": plan_gate_status,
             "compliance_status": "FAIL" if has_fail else ("WARN" if has_warn else "PASS"),
             "policy_status": policy_result["status"],
             "execution_allowed": policy_result["execution_allowed"] and not has_fail,

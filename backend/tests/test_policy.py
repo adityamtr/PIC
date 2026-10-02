@@ -62,6 +62,24 @@ class PolicyTests(unittest.TestCase):
                             and check["status"] == "ESCALATE"
                             for check in result["checks"]))
 
+    def test_buy_screen_uses_block_thresholds_not_warning_bands(self):
+        dataset = self.make_dataset()
+        holding = dataset["holdings_by_ticker"]["TEST"]
+        holding.update({
+            "adv_cr": 100.0,
+            "bid_ask_spread_pct": 0.75,
+            "fx_exposure_pct": 12.0,
+            "price_stale": False,
+        })
+
+        self.assertIsNone(policy.buy_exclusion_reason(dataset, "TEST"))
+
+        holding["bid_ask_spread_pct"] = 1.01
+        self.assertIsNotNone(policy.buy_exclusion_reason(dataset, "TEST"))
+        holding["bid_ask_spread_pct"] = 0.75
+        holding["fx_exposure_pct"] = 15.01
+        self.assertIsNotNone(policy.buy_exclusion_reason(dataset, "TEST"))
+
 
 if __name__ == "__main__":
     unittest.main()

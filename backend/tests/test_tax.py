@@ -78,6 +78,17 @@ class TaxLotsTests(unittest.TestCase):
 
 
 class OptimizerTaxAwareTests(unittest.TestCase):
+    def test_plan_gate_prioritizes_policy_blocks_over_warnings(self):
+        self.assertEqual(planner._plan_gate_status(False, "BLOCK", True), "BLOCKED")
+        self.assertEqual(planner._plan_gate_status(True, "WARN", True), "BLOCKED")
+        self.assertEqual(planner._plan_gate_status(False, "ESCALATE", True), "ESCALATE")
+
+    def test_optimized_buy_order_uses_candidate_price(self):
+        order = planner._order({}, "CIPLA", "BUY", shares=100, price_override=427.5)
+
+        self.assertEqual(order["price"], 427.5)
+        self.assertEqual(order["est_value"], 42_750.0)
+
     def test_sell_order_uses_holding_price_when_universe_quote_differs(self):
         holding = {
             "ticker": "HDFCBANK", "name": "HDFC Bank", "sector": "Financial Services",
