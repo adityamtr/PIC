@@ -484,3 +484,83 @@ def list_fund_datasets_all() -> dict[str, dict] | None:
         except (TypeError, json.JSONDecodeError):
             continue
     return datasets or None
+
+
+# --------------------------------------------------------------------------- #
+# Risk/return metrics (read) — seeded by scripts/compute_risk_return_metrics.py
+# --------------------------------------------------------------------------- #
+_FUND_RISK_RETURN_COLS = (
+    "fund_id, fund_name, category, risk_grade, as_of_date, mapped_holdings, "
+    "mapped_weight_pct, n_obs, return_1m, return_3m, return_6m, annualized_return, "
+    "annualized_volatility, max_drawdown, sharpe_ratio, sortino_ratio, "
+    "strategy_range_source, strategy_return_low, strategy_return_high, "
+    "strategy_volatility_low, strategy_volatility_high"
+)
+
+_STOCK_RISK_RETURN_COLS = (
+    "isin, symbol, as_of_date, n_obs, return_1m, return_3m, return_6m, "
+    "annualized_return, annualized_volatility, max_drawdown, sharpe_ratio, sortino_ratio"
+)
+
+
+def get_fund_risk_return_metrics(fund_id: str) -> dict[str, Any] | None:
+    """Fund-level synthetic risk/return metrics + curated strategy band, or None."""
+    if not available():
+        return None
+    try:
+        with connect() as conn:
+            row = conn.execute(
+                f"SELECT {_FUND_RISK_RETURN_COLS} FROM fund_risk_return_metrics WHERE fund_id = ?",
+                (fund_id,),
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    return dict(row) if row else None
+
+
+def get_stock_risk_return_metrics(isins: list[str] | None = None) -> dict[str, dict[str, Any]] | None:
+    """Return ``{isin: metrics}`` for the given ISINs (or every seeded stock when
+    ``isins`` is omitted), or ``None`` if unavailable."""
+    if not available():
+        return None
+    try:
+        with connect() as conn:
+            if isins is None:
+                rows = conn.execute(f"SELECT {_STOCK_RISK_RETURN_COLS} FROM stock_risk_return_metrics").fetchall()
+            else:
+                if not isins:
+                    return {}
+                placeholders = ",".join("?" * len(isins))
+                rows = conn.execute(
+                    f"SELECT {_STOCK_RISK_RETURN_COLS} FROM stock_risk_return_metrics "
+                    f"WHERE isin IN ({placeholders})",
+                    isins,
+                ).fetchall()
+    except sqlite3.Error:
+        return None
+    return {r["isin"]: dict(r) for r in rows}
+
+
+def get_stock_price_levels(isins: list[str]) -> dict[str, list[tuple[str, float]]] | None:
+    """Return ``{isin: [(date, level), ...]}`` (ascending by date; ``level`` is
+    adjusted close, falling back to close) for the given ISINs. Used to build a
+    return-covariance matrix at runtime. ``None`` if unavailable."""
+    if not available() or not isins:
+        return None
+    try:
+        with connect() as conn:
+            placeholders = ",".join("?" * len(isins))
+            rows = conn.execute(
+                f"SELECT isin, date, monthly_adj_close, monthly_close FROM stock_prices "
+                f"WHERE isin IN ({placeholders}) ORDER BY isin, date",
+                isins,
+            ).fetchall()
+    except sqlite3.Error:
+        return None
+    series: dict[str, list[tuple[str, float]]] = {}
+    for r in rows:
+        level = r["monthly_adj_close"] if r["monthly_adj_close"] is not None else r["monthly_close"]
+        if level is None:
+            continue
+        series.setdefault(r["isin"], []).append((r["date"], level))
+    return series

@@ -10,6 +10,9 @@ seed the reference data that already exists in the repo:
                                     + data/processed/final/stock_macro_monthly_target.csv
   * macro_indicators             <- macro columns of the same monthly target file
   * predictions                  <- backend/predictions/**/predictions.json (TFT forecasts)
+  * stock_risk_return_metrics    <- data/processed/final/stock_risk_return_metrics.csv
+  * fund_risk_return_metrics     <- data/processed/final/fund_risk_return_metrics.csv
+                                    (both from scripts/compute_risk_return_metrics.py)
   * compliance/policy/tax rules  <- backend/app/{data_v2,policy,tax_rules} constants
   * plans (+ child tables)        <- empty; populated at runtime by the API
 
@@ -54,6 +57,8 @@ DEFAULT_DB_PATH = Path(os.environ["PIC_DB_PATH"]) if os.environ.get("PIC_DB_PATH
 
 UNIVERSE_CSV = REPO_ROOT / "data" / "processed" / "equity_stock_universe.csv"
 TARGET_CSV = REPO_ROOT / "data" / "processed" / "final" / "stock_macro_monthly_target.csv"
+STOCK_RISK_RETURN_CSV = REPO_ROOT / "data" / "processed" / "final" / "stock_risk_return_metrics.csv"
+FUND_RISK_RETURN_CSV = REPO_ROOT / "data" / "processed" / "final" / "fund_risk_return_metrics.csv"
 PREDICTIONS_DIR = BACKEND_DIR / "predictions"
 
 # Make `from app import ...` work when run as a plain script.
@@ -70,8 +75,10 @@ TABLES = [
     "plan_funding_sources", "plan_orders", "plans",
     "tax_rules", "esg_exclusions", "policy_thresholds",
     "compliance_rules", "fund_compliance_limits",
-    "predictions", "tax_lots", "fund_holdings", "funds",
-    "stock_prices", "macro_indicators", "stocks",
+    "predictions", "tax_lots", "fund_holdings",
+    "fund_risk_return_metrics", "funds",
+    "stock_prices", "macro_indicators",
+    "stock_risk_return_metrics", "stocks",
 ]
 
 SCHEMA_SQL = """
@@ -153,6 +160,53 @@ JOIN (
     FROM predictions
     GROUP BY model_version
 ) m ON p.model_version = m.model_version AND p.prediction_date = m.max_date;
+
+-- ------------------------------------------------------------------ --
+-- Risk/return metrics (scripts/compute_risk_return_metrics.py).
+-- Stock level: computed directly from stock_prices history. Fund level:
+-- synthetic (current holding weights applied to that same history), plus a
+-- fixed curated strategy mandate band (not derived from the synthetic calc).
+-- ------------------------------------------------------------------ --
+CREATE TABLE IF NOT EXISTS stock_risk_return_metrics (
+    isin                  TEXT PRIMARY KEY,
+    symbol                TEXT,
+    as_of_date            TEXT,
+    n_obs                 INTEGER,
+    return_1m             REAL,
+    return_3m             REAL,
+    return_6m             REAL,
+    annualized_return     REAL,
+    annualized_volatility REAL,
+    max_drawdown          REAL,
+    sharpe_ratio          REAL,
+    sortino_ratio         REAL,
+    FOREIGN KEY (isin) REFERENCES stocks(isin)
+);
+
+CREATE TABLE IF NOT EXISTS fund_risk_return_metrics (
+    fund_id                 TEXT PRIMARY KEY,
+    fund_name                TEXT,
+    category                 TEXT,
+    risk_grade               TEXT,
+    as_of_date                TEXT,
+    mapped_holdings           INTEGER,
+    mapped_weight_pct         REAL,
+    n_obs                     INTEGER,
+    return_1m                 REAL,
+    return_3m                 REAL,
+    return_6m                 REAL,
+    annualized_return         REAL,   -- synthetic: current weights x historical stock returns
+    annualized_volatility     REAL,   -- synthetic
+    max_drawdown              REAL,   -- synthetic
+    sharpe_ratio              REAL,   -- synthetic
+    sortino_ratio             REAL,   -- synthetic
+    strategy_range_source     TEXT,   -- 'rolling_percentile' or 'risk_grade_fallback'
+    strategy_return_low       REAL,   -- fixed mandate band, NOT derived from the synthetic series
+    strategy_return_high      REAL,
+    strategy_volatility_low   REAL,
+    strategy_volatility_high  REAL,
+    FOREIGN KEY (fund_id) REFERENCES funds(fund_id)
+);
 
 -- ------------------------------------------------------------------ --
 -- Funds and their holdings
@@ -781,6 +835,79 @@ def seed_predictions(conn: sqlite3.Connection) -> int:
     return total
 
 
+def seed_stock_risk_return_metrics(conn: sqlite3.Connection) -> int:
+    """Per-ISIN risk/return metrics computed by compute_risk_return_metrics.py."""
+    if not STOCK_RISK_RETURN_CSV.exists():
+        print(f"  ! skipping stock_risk_return_metrics: {STOCK_RISK_RETURN_CSV} not found "
+              f"(run scripts/compute_risk_return_metrics.py first)")
+        return 0
+
+    rows = []
+    with STOCK_RISK_RETURN_CSV.open(encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            isin = (row.get("isin") or "").strip()
+            if not isin:
+                continue
+            rows.append((
+                isin, (row.get("symbol") or "").strip() or None, row.get("as_of_date") or None,
+                _i(row.get("n_obs")), _f(row.get("return_1m")), _f(row.get("return_3m")),
+                _f(row.get("return_6m")), _f(row.get("annualized_return")),
+                _f(row.get("annualized_volatility")), _f(row.get("max_drawdown")),
+                _f(row.get("sharpe_ratio")), _f(row.get("sortino_ratio")),
+            ))
+
+    conn.executemany(
+        "INSERT OR REPLACE INTO stock_risk_return_metrics "
+        "(isin, symbol, as_of_date, n_obs, return_1m, return_3m, return_6m, "
+        " annualized_return, annualized_volatility, max_drawdown, sharpe_ratio, sortino_ratio) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+    return len(rows)
+
+
+def seed_fund_risk_return_metrics(conn: sqlite3.Connection) -> int:
+    """Per-fund synthetic risk/return metrics + curated strategy band, computed by
+    compute_risk_return_metrics.py."""
+    if not FUND_RISK_RETURN_CSV.exists():
+        print(f"  ! skipping fund_risk_return_metrics: {FUND_RISK_RETURN_CSV} not found "
+              f"(run scripts/compute_risk_return_metrics.py first)")
+        return 0
+
+    rows = []
+    with FUND_RISK_RETURN_CSV.open(encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            fund_id = (row.get("fund_id") or "").strip()
+            if not fund_id:
+                continue
+            rows.append((
+                fund_id, row.get("fund_name") or None, row.get("category") or None,
+                row.get("risk_grade") or None, row.get("as_of_date") or None,
+                _i(row.get("mapped_holdings")), _f(row.get("mapped_weight_pct")),
+                _i(row.get("n_obs")), _f(row.get("return_1m")), _f(row.get("return_3m")),
+                _f(row.get("return_6m")), _f(row.get("annualized_return")),
+                _f(row.get("annualized_volatility")), _f(row.get("max_drawdown")),
+                _f(row.get("sharpe_ratio")), _f(row.get("sortino_ratio")),
+                row.get("strategy_range_source") or None,
+                _f(row.get("strategy_return_low")), _f(row.get("strategy_return_high")),
+                _f(row.get("strategy_volatility_low")), _f(row.get("strategy_volatility_high")),
+            ))
+
+    conn.executemany(
+        "INSERT OR REPLACE INTO fund_risk_return_metrics "
+        "(fund_id, fund_name, category, risk_grade, as_of_date, mapped_holdings, "
+        " mapped_weight_pct, n_obs, return_1m, return_3m, return_6m, annualized_return, "
+        " annualized_volatility, max_drawdown, sharpe_ratio, sortino_ratio, "
+        " strategy_range_source, strategy_return_low, strategy_return_high, "
+        " strategy_volatility_low, strategy_volatility_high) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+    return len(rows)
+
+
 # --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
@@ -824,6 +951,10 @@ def main() -> None:
             print(f"  tax_lots:    {n_lots}")
             n_pred = seed_predictions(conn)
             print(f"  predictions: {n_pred}")
+            n_stock_metrics = seed_stock_risk_return_metrics(conn)
+            n_fund_metrics = seed_fund_risk_return_metrics(conn)
+            print(f"  stock_risk_return_metrics:{n_stock_metrics}   "
+                  f"fund_risk_return_metrics:{n_fund_metrics}")
             rules = seed_compliance(conn)
             if rules:
                 print(f"  fund_compliance_limits:{rules['fund_limits']}   "

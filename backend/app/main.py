@@ -14,7 +14,10 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import subprocess
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query
@@ -40,6 +43,7 @@ app.add_middleware(
 )
 
 _PLANS: dict[str, dict] = {}
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 
 def _to_cr(value):
@@ -77,6 +81,25 @@ def switch_model_version(version: str = Query(..., description="Target model ver
     """Switch active model version across the application in one go."""
     new_version = forecast.set_active_model_version(version)
     return {"status": "success", "switched_to": new_version, "model": forecast.get_active_model_info()}
+
+
+@app.post("/api/admin/reset-db")
+def reset_database():
+    """Drop, recreate, and reseed the SQLite database from source data (same as
+    running ``scripts/init_db.py --reset`` from a terminal). Destructive: wipes
+    every generated plan/decision and any in-session edits to fund data."""
+    script = _BACKEND_DIR / "scripts" / "init_db.py"
+    try:
+        result = subprocess.run(
+            [sys.executable, str(script), "--reset", "--db-path", str(db.db_path())],
+            cwd=str(_BACKEND_DIR), capture_output=True, text=True, timeout=180,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail="Database reset timed out") from exc
+    if result.returncode != 0:
+        raise HTTPException(status_code=500, detail=result.stderr[-2000:] or "Database reset failed")
+    _PLANS.clear()   # drop any not-yet-decided plans generated before the reset
+    return {"status": "reset", "db_path": str(db.db_path())}
 
 
 @app.get("/api/funds")
@@ -207,32 +230,67 @@ def get_universe():
     return {"universe": []}
 
 
+@app.get("/api/risk-return")
+def get_risk_return(fund_id: str | None = Query(None)):
+    """Fund-level synthetic risk/return point + curated strategy mandate band,
+    plus per-holding stock-level risk/return metrics, for the risk/return
+    graph and slider. See docs/nav-risk-return-metrics.md and
+    docs/data-v2-real-vs-curated.md."""
+    ds = _ds(fund_id)
+    fund_metrics = db.get_fund_risk_return_metrics(ds["id"])
+    isins = [h["isin"] for h in ds["holdings"] if h.get("isin")]
+    stock_metrics = db.get_stock_risk_return_metrics(isins) or {}
+    stocks = []
+    for h in ds["holdings"]:
+        m = stock_metrics.get(h.get("isin"))
+        if not m:
+            continue
+        stocks.append({
+            "ticker": h["ticker"], "name": h["name"], "sector": h["sector"], "weight": h["weight"],
+            "annualized_return": m["annualized_return"], "annualized_volatility": m["annualized_volatility"],
+            "sharpe_ratio": m["sharpe_ratio"], "sortino_ratio": m["sortino_ratio"],
+        })
+    historical = planner._estimate_post_trade_risk_return(ds, [], None, "rebalance", 0.0)
+    return {
+        "fund": fund_metrics,
+        "stocks": stocks,
+        "historical_portfolio": {
+            "annualized_return": historical["fund_current_annualized_return"],
+            "annualized_volatility": historical["fund_current_annualized_volatility"],
+        },
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Trade-plan generation & PIC review
 # --------------------------------------------------------------------------- #
 def _load_plan(plan_id: str) -> dict | None:
-    """Fetch a plan from the DB (source of truth). The in-memory cache is only
-    consulted when the DB itself is unreachable — never as a gap-filler for a
-    DB that is reachable but doesn't have the plan (e.g. after a reseed/reset),
-    or a since-approved/rejected plan would resurrect its pre-decision state."""
+    """Fetch a plan, DB first (source of truth once a decision has been made —
+    see ``decide_trade_plan``, which is the only place a plan is written to the
+    DB). A plan with no decision yet is never in the DB, so the in-memory cache
+    is the fallback for that case; it's also the only source when the DB itself
+    is unreachable. It is never used to resurrect a since-decided plan after a
+    reseed/reset, since a decided plan is always in the DB and a reset clears
+    the in-memory cache too (see ``reset_database``)."""
     if db.available():
-        return db.get_plan(plan_id)
+        plan = db.get_plan(plan_id)
+        if plan is not None:
+            return plan
     return _PLANS.get(plan_id)
 
 
 @app.post("/api/trade-plan")
 def create_trade_plan(req: IntentRequest, fund_id: str | None = Query(None)):
     plan = planner.generate_plan(fund_id or req.fund_id, req.model_dump(exclude={"fund_id"}))
-    _PLANS[plan["plan_id"]] = plan   # in-memory cache (fallback when DB is absent)
-    db.save_plan(plan)               # persist to SQLite (no-op if DB unavailable)
+    _PLANS[plan["plan_id"]] = plan   # in-memory only until a PIC decision is recorded
     return plan
 
 
 # Each granular step is real backend work, but generation is sub-second, so we
 # linger on every emitted step for a randomised 1-3s. This keeps each real
 # output readable and gives the stream a natural, non-mechanical cadence.
-_STEP_DWELL_MIN_SECONDS = 0.5
-_STEP_DWELL_MAX_SECONDS = 1.0
+_STEP_DWELL_MIN_SECONDS = 0.0
+_STEP_DWELL_MAX_SECONDS = 0.1
 
 
 @app.post("/api/trade-plan/stream")
@@ -251,8 +309,7 @@ async def create_trade_plan_stream(req: IntentRequest, fund_id: str | None = Que
             for event in planner.iter_plan_steps(resolved_fund, intent):
                 if event.get("type") == "plan":
                     plan = event["plan"]
-                    _PLANS[plan["plan_id"]] = plan   # in-memory cache
-                    db.save_plan(plan)               # persist (no-op if DB unavailable)
+                    _PLANS[plan["plan_id"]] = plan   # in-memory only until a PIC decision is recorded
                     yield {"event": "plan", "data": json.dumps(plan)}
                 else:
                     yield {"event": "progress", "data": json.dumps(event)}
@@ -275,10 +332,12 @@ def list_trade_plans(fund_id: str | None = Query(None)):
     if plans is not None:
         ordered = sorted(plans, key=lambda plan: plan.get("created_at") or "", reverse=True)
         return {"plans": ordered, "count": len(ordered)}
-    # DB unreachable: in-memory cache is the only thing we have.
+    # DB unreachable: in-memory cache is the only thing we have. Only plans with
+    # a recorded decision count as "history" (matches the DB path, where a plan
+    # is written only once decided).
     in_memory = [
         plan for plan in _PLANS.values()
-        if fund_id is None or plan.get("fund", {}).get("fund_id") == fund_id
+        if plan.get("decision") and (fund_id is None or plan.get("fund", {}).get("fund_id") == fund_id)
     ]
     ordered = sorted(in_memory, key=lambda plan: plan.get("created_at") or "", reverse=True)
     return {"plans": ordered, "count": len(ordered)}
@@ -358,6 +417,11 @@ def decide_trade_plan(plan_id: str, req: DecisionRequest):
     plan["decision"] = decision
     if plan_id in _PLANS:
         _PLANS[plan_id] = plan
+    # A plan only enters the DB (i.e. plan history) once a PIC decision is made —
+    # save_plan() here is this plan's first-ever DB write, carrying the decision
+    # already merged in. save_decision() then also appends the plan_decisions
+    # audit row (a no-op update of the row save_plan just wrote otherwise).
+    db.save_plan(plan)
     db.save_decision(plan_id, new_status, decision)   # persist (no-op if DB absent)
     return DecisionResponse(plan_id=plan_id, status=new_status, decision=req.decision,
                             reviewer=req.reviewer, comment=req.comment, decided_at=decided_at)

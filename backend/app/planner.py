@@ -19,9 +19,10 @@ import math
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
+import numpy as np
 import pandas_market_calendars as mcal
 
-from . import data, data_v2, db, forecast, optimizer, policy, tax_lots, tax_rules
+from . import data, data_v2, db, forecast, optimizer, policy, risk_model, tax_lots, tax_rules
 
 CRORE = data.CRORE
 
@@ -835,13 +836,149 @@ def _sell_candidates(ds, sectors, returns):
             and _usable_price(h["price"])]
 
 
-def _orders_by_optimizer(ds, action, sectors, amount, investable, returns, horizon_days=None):
+def _historical_stock_context(ds):
+    metrics_by_isin = db.get_stock_risk_return_metrics() or {}
+    metrics_by_ticker = {
+        metric["symbol"]: metric for metric in metrics_by_isin.values()
+        if metric.get("symbol")
+    }
+    isin_by_ticker = {ticker: metric["isin"] for ticker, metric in metrics_by_ticker.items()}
+    for holding in ds["holdings"]:
+        if holding.get("isin"):
+            isin_by_ticker[holding["ticker"]] = holding["isin"]
+    return metrics_by_isin, metrics_by_ticker, isin_by_ticker
+
+
+def _build_risk_context(ds, target_volatility):
+    """Build a historical covariance matrix and the requested risk target.
+
+    The covariance includes current holdings and every mapped buy-universe
+    security, so new positions participate in target tracking instead of
+    disappearing from the optimizer's risk calculation.
+    """
+    fund_metrics = db.get_fund_risk_return_metrics(ds["id"]) if ds["id"] in data_v2.FUNDS_V2 else None
+    selected_target = target_volatility
+    if selected_target is None and fund_metrics:
+        selected_target = fund_metrics.get("strategy_volatility_high")
+    if selected_target is None or selected_target < 0:
+        return None
+
+    metrics_by_isin, _, isin_by_ticker = _historical_stock_context(ds)
+    candidate_tickers = list(dict.fromkeys(
+        [h["ticker"] for h in ds["holdings"]]
+        + [item["ticker"] for item in data.UNIVERSE]
+    ))
+    risk_tickers = [ticker for ticker in candidate_tickers if isin_by_ticker.get(ticker)]
+    if len(risk_tickers) < 2:
+        return None
+    kept, cov_monthly, dropped = risk_model.build_covariance(risk_tickers, isin_by_ticker)
+    stock_metrics = {
+        isin: metrics_by_isin[isin] for isin in set(isin_by_ticker.values())
+        if isin in metrics_by_isin
+    }
+    default_vol = (fund_metrics or {}).get("annualized_volatility") or 0.20
+    all_tickers, cov_monthly = risk_model.extend_with_diagonal_fallback(
+        kept, cov_monthly, dropped, isin_by_ticker, stock_metrics, default_vol,
+    )
+    if len(all_tickers) < 2:
+        return None
+    return {
+        "tickers": all_tickers,
+        "cov_monthly": cov_monthly,
+        "target_volatility": float(selected_target),
+        "sigma_max_annual": float(selected_target),
+        "current_value_by_ticker": {h["ticker"]: h["market_value"] for h in ds["holdings"]},
+        "dropped_tickers": dropped,
+        "fund_metrics": fund_metrics,
+    }
+
+
+def _estimate_post_trade_risk_return(ds, orders, target_volatility, action, amount):
+    """Estimate comparable before/after returns and risk from historical data."""
+    fund_metrics = db.get_fund_risk_return_metrics(ds["id"]) if ds["id"] in data_v2.FUNDS_V2 else None
+    selected_target = target_volatility
+    if selected_target is None:
+        selected_target = (fund_metrics or {}).get("strategy_volatility_high")
+
+    current_value = {h["ticker"]: h["market_value"] for h in ds["holdings"]}
+    delta = {}
+    for o in orders:
+        sign = 1 if o["side"] == "BUY" else -1
+        delta[o["ticker"]] = delta.get(o["ticker"], 0.0) + sign * o["est_value"]
+    post_value = dict(current_value)
+    for ticker, d in delta.items():
+        post_value[ticker] = post_value.get(ticker, 0.0) + d
+    aum = ds["aum"] or 1.0
+    post_aum = aum + amount if action == "contribution" else aum
+    if action == "redemption":
+        post_aum = max(aum - amount, 1.0)
+
+    metrics_by_isin, metrics_by_ticker, isin_by_ticker = _historical_stock_context(ds)
+    all_tickers = list(dict.fromkeys(current_value.keys() | post_value.keys()))
+    all_tickers = [ticker for ticker in all_tickers if isin_by_ticker.get(ticker)]
+    kept, cov_monthly, dropped = risk_model.build_covariance(all_tickers, isin_by_ticker)
+    stock_metrics = {
+        isin: metrics_by_isin[isin] for isin in set(isin_by_ticker.values())
+        if isin in metrics_by_isin
+    }
+    all_tickers, cov_monthly = risk_model.extend_with_diagonal_fallback(
+        kept, cov_monthly, dropped, isin_by_ticker, stock_metrics,
+        (fund_metrics or {}).get("annualized_volatility") or 0.20,
+    )
+
+    def historical_volatility(values, portfolio_aum):
+        if len(all_tickers) < 2:
+            return None
+        weights = np.array([max(values.get(ticker, 0.0), 0.0) / portfolio_aum for ticker in all_tickers])
+        return risk_model.portfolio_annual_volatility(weights, cov_monthly)
+
+    def historical_return(values, portfolio_aum):
+        return sum(
+            max(value, 0.0) * (metrics_by_ticker.get(ticker, {}).get("annualized_return") or 0.0)
+            for ticker, value in values.items()
+        ) / portfolio_aum
+
+    current_volatility = historical_volatility(current_value, aum)
+    post_volatility = historical_volatility(post_value, post_aum)
+    current_return = historical_return(current_value, aum)
+    post_return = historical_return(post_value, post_aum)
+    target_gap = post_volatility - selected_target if post_volatility is not None and selected_target is not None else None
+    target_tolerance = max(0.002, (selected_target or 0.0) * 0.02)
+
+    return {
+        "fund_strategy_band": {
+            "return_low": (fund_metrics or {}).get("strategy_return_low"),
+            "return_high": (fund_metrics or {}).get("strategy_return_high"),
+            "volatility_low": (fund_metrics or {}).get("strategy_volatility_low"),
+            "volatility_high": (fund_metrics or {}).get("strategy_volatility_high"),
+            "source": (fund_metrics or {}).get("strategy_range_source"),
+        } if fund_metrics else None,
+        "fund_current_annualized_return": round(current_return, 4),
+        "fund_current_annualized_volatility": (
+            round(current_volatility, 4) if current_volatility is not None else None),
+        "target_volatility": selected_target,
+        "estimated_post_trade_annualized_return": round(post_return, 4),
+        "estimated_post_trade_annualized_volatility": (
+            round(post_volatility, 4) if post_volatility is not None else None),
+        "volatility_target_gap": round(target_gap, 4) if target_gap is not None else None,
+        "volatility_target_reached": (
+            abs(target_gap) <= target_tolerance if target_gap is not None else None),
+        "historical_metric_coverage_pct": round(
+            sum(max(value, 0.0) for ticker, value in post_value.items()
+                if ticker in metrics_by_ticker) / post_aum * 100, 1),
+        "covariance_coverage": len(all_tickers),
+    }
+
+
+def _orders_by_optimizer(ds, action, sectors, amount, investable, returns, horizon_days=None,
+                         target_volatility=None):
     """Forecast-driven order generation. Returns the usual tuple plus an
     optimization-meta dict. Raises on solver problems so the caller can fall
     back to the rule-based path."""
     orders, funding_sources, risk_notes, warnings = [], [], [], []
     opt_meta = None
     aum = ds["aum"]
+    risk_ctx = _build_risk_context(ds, target_volatility)
 
     if action in ("contribution", "increase", "buy", "add"):
         if action != "contribution" and not sectors:
@@ -860,7 +997,7 @@ def _orders_by_optimizer(ds, action, sectors, amount, investable, returns, horiz
         allocations, opt_meta = optimizer.optimize_buy(
             candidates, amount, aum, lim["single_issuer_limit"] / 100,
             sector_cap_frac=lim["sector_soft_limit"] / 100,
-            sector_current=sector_current, cap_aum=cap_aum)
+            sector_current=sector_current, cap_aum=cap_aum, risk=risk_ctx)
         for a in allocations:
             orders.append({**_order(ds, a["ticker"], "BUY", shares=a["shares"]),
                            "reason": "Convex-optimized to maximize forecast return"})
@@ -884,7 +1021,8 @@ def _orders_by_optimizer(ds, action, sectors, amount, investable, returns, horiz
     elif action in ("redemption", "decrease", "sell", "trim", "raise_cash"):
         sec = sectors if action in ("decrease", "sell", "trim") else None
         candidates = _sell_candidates(ds, sec, returns)
-        sells, opt_meta = optimizer.optimize_sell(candidates, amount, horizon_days=horizon_days)
+        sells, opt_meta = optimizer.optimize_sell(candidates, amount, horizon_days=horizon_days,
+                                                   risk=risk_ctx, aum=aum)
         for sdict in sells:
             orders.append({**_order(ds, sdict["ticker"], "SELL", shares=sdict["shares"]),
                            "reason": "Convex-optimized to minimize forecast return given up + exit tax"})
@@ -895,24 +1033,41 @@ def _orders_by_optimizer(ds, action, sectors, amount, investable, returns, horiz
                                 "reason": "Cash raised by selling the lowest-forecast-return names."}]
 
     elif action == "rebalance":
-        holdings = [{**h, "expected_return": returns.get(h["ticker"], 0.0)} for h in ds["holdings"]]
-        targets, opt_meta = optimizer.optimize_rebalance(holdings, aum, _ISSUER_CAP_FRAC)
+        existing_by_ticker = {h["ticker"]: h for h in ds["holdings"]}
+        holdings = [
+            {**h, "sellable_shares": _available_sellable_shares(ds, h),
+             "expected_return": returns.get(h["ticker"], 0.0)}
+            for h in ds["holdings"]
+        ]
+        for candidate in _buy_candidates(ds, None, returns):
+            if candidate["ticker"] in existing_by_ticker:
+                continue
+            holdings.append({
+                "ticker": candidate["ticker"], "price": candidate["price"],
+                "market_value": 0.0, "sellable_shares": 0,
+                "expected_return": candidate["expected_return"],
+                "effective_tax_rate_pct": 0.0, "txn_cost_rate_pct": 0.0,
+            })
+        targets, opt_meta = optimizer.optimize_rebalance(holdings, aum, _ISSUER_CAP_FRAC, risk=risk_ctx)
         min_ticket = 0.25 * CRORE
+        rebalance_by_ticker = {h["ticker"]: h for h in holdings}
         for t in targets:
-            h = data.holding(ds, t["ticker"])
+            ticker = t["ticker"]
+            h = existing_by_ticker.get(ticker)
+            candidate = rebalance_by_ticker[ticker]
             delta = t["delta_rupees"]
-            if abs(delta) < min_ticket or not h or not _usable_price(h["price"]):
+            if abs(delta) < min_ticket or not _usable_price(candidate["price"]):
                 continue
             if delta > 0:
-                shares = int(delta // h["price"])
+                shares = int(delta // candidate["price"])
                 if shares > 0:
-                    orders.append({**_order(ds, h["ticker"], "BUY", shares=shares),
+                    orders.append({**_order(ds, ticker, "BUY", shares=shares),
                                    "reason": "Convex rebalance toward higher forecast return"})
-            else:
-                sellable_value = h["sellable_shares"] * h["price"]
+            elif h:
+                sellable_value = _available_sellable_shares(ds, h) * h["price"]
                 shares = int(min(-delta, sellable_value) // h["price"])
                 if shares > 0:
-                    orders.append({**_order(ds, h["ticker"], "SELL", shares=shares),
+                    orders.append({**_order(ds, ticker, "SELL", shares=shares),
                                    "reason": "Convex rebalance toward higher forecast return"})
     else:
         warnings.append(f"Unknown action '{action}'.")
@@ -1164,7 +1319,8 @@ def iter_plan_steps(fund_id, intent):
         else:
             try:
                 orders, funding_sources, risk_notes, warnings, opt_meta = _orders_by_optimizer(
-                    ds, action, sectors, amount, investable, returns, horizon)
+                    ds, action, sectors, amount, investable, returns, horizon,
+                    target_volatility=intent.get("target_volatility"))
             except Exception as exc:  # solver / feasibility issue -> fall back
                 method_used = "rules"
                 orders, funding_sources, risk_notes, warnings = _orders_by_rules(
@@ -1302,6 +1458,9 @@ def iter_plan_steps(fund_id, intent):
     pending = [{**t, "gross_value_cr": round(t["gross_value"] / CRORE, 2),
                 "cash_impact_cr": round(t["cash_impact"] / CRORE, 2)} for t in ds["pending_trades"]]
 
+    risk_return = _estimate_post_trade_risk_return(
+        ds, orders, intent.get("target_volatility"), action, amount)
+
     plan = {
         "plan_id": f"PLAN-{uuid.uuid4().hex[:8].upper()}",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -1315,6 +1474,7 @@ def iter_plan_steps(fund_id, intent):
                    "method": requested_method},
         "allocation_method": method_used,
         "optimization": opt_meta,
+        "risk_return": risk_return,
         "forecast": forecast.summary(ds),
         "cash_flow_planning": cfp,
         "pending_trades": pending,
