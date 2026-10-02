@@ -90,6 +90,11 @@ export const api = {
   eventCalendar: (fundId) => get(`/event-calendar${qs(fundId)}`),
   riskReturn: (fundId) => get(`/risk-return${qs(fundId)}`),
   createTradePlan: (intent) => post('/trade-plan', intent),
+  interpretIntent: (request) => post('/assistant/interpret', request),
+  assistantChat: (planId, message, history) => post(
+    `/trade-plan/${encodeURIComponent(planId)}/assistant-chat`,
+    { message, history },
+  ),
   // Streaming variant: emits real per-phase progress via `onProgress`, resolves
   // with the finished plan. Falls back to throwing on an `error` event.
   createTradePlanStream: async (intent, { onProgress, signal } = {}) => {

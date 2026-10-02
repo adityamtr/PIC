@@ -55,6 +55,22 @@ plan still comes back as `Pending PIC Review`. Every plan includes a `forecast`
 block (the predicted returns) and, for `optimize`, an `optimization` meta block
 (solver, status, objective); every order carries its `expected_return`.
 
+## Planner assistant
+
+The Trade Planner chat translates plain-language requests into validated form
+updates, including fund, action, allocation method, dates, risk target, and
+manual security or sector selections. The UI stages those changes with an
+animation and requires a separate confirmation before generating a plan.
+
+After a plan is generated, the assistant answers review questions using
+read-only tools for the plan summary, policy/compliance results, and order
+details. It cannot change a plan, record a PIC decision, or submit trades.
+
+Configure `OPENAI_API_KEY` in `backend/.env` for assistant calls. The optional
+`OPENAI_ASSISTANT_MODEL` setting selects its model; when omitted, the assistant
+uses `OPENAI_EMAIL_MODEL` and then the email-draft default. The key remains on
+the backend and is never sent to the browser.
+
 ## Key endpoints
 
 | Method | Path | Purpose |
@@ -71,6 +87,8 @@ block (the predicted returns) and, for `optimize`, an `optimization` meta block
 | GET | `/api/lock-ins` | Locked positions |
 | GET | `/api/event-calendar` | Earnings / ex-dates |
 | POST | `/api/trade-plan` | Generate a plan from PM intent |
+| POST | `/api/assistant/interpret` | Translate a plain-language request into validated form updates |
+| POST | `/api/trade-plan/{id}/assistant-chat` | Ask read-only questions about a generated plan |
 | POST | `/api/trade-plan/{id}/decision` | Record a PIC decision |
 
 ### Example: generate a plan

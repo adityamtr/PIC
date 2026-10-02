@@ -12,6 +12,7 @@ import SendOutlinedIcon from '@mui/icons-material/SendOutlined'
 import CheckCircleIcon from '@mui/icons-material/CheckCircle'
 import CloseIcon from '@mui/icons-material/CloseOutlined'
 import NorthEastIcon from '@mui/icons-material/NorthEast'
+import HistoryOutlinedIcon from '@mui/icons-material/HistoryOutlined'
 import ReactMarkdown from 'react-markdown'
 import { api } from '../api'
 import { fmtCrValue, fmtNum, fmtRupee } from '../format'
@@ -410,7 +411,7 @@ export default function PlanHistory({ fundId, focusPlanId = '' }) {
 
   return (
     <Stack spacing={2}>
-      <Panel title="Generated Plans" subtitle="Plans for the selected fund, newest first. Expand a plan to review details and take action.">
+      <Panel icon={<HistoryOutlinedIcon />} title="Generated Plans" subtitle="Plans for the selected fund, newest first. Expand a plan to review details and take action.">
         {loading ? (
           <Box sx={{ display: 'flex', justifyContent: 'center', py: 5 }}><CircularProgress size={26} /></Box>
         ) : loadError ? (

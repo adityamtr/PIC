@@ -7,6 +7,10 @@ import DarkModeIcon from '@mui/icons-material/DarkModeOutlined'
 import LightModeIcon from '@mui/icons-material/LightModeOutlined'
 import RestartAltIcon from '@mui/icons-material/RestartAlt'
 import CircleIcon from '@mui/icons-material/Circle'
+import CandlestickChartOutlinedIcon from '@mui/icons-material/CandlestickChartOutlined'
+import AccountBalanceWalletOutlinedIcon from '@mui/icons-material/AccountBalanceWalletOutlined'
+import SwapHorizOutlinedIcon from '@mui/icons-material/SwapHorizOutlined'
+import HistoryOutlinedIcon from '@mui/icons-material/HistoryOutlined'
 import { buildTheme, BRAND_GRADIENT } from './theme'
 import { Logo } from './components/Logo'
 import { api } from './api'
@@ -61,7 +65,8 @@ export default function App() {
       <CssBaseline />
       <AppBar position="sticky" color="default" elevation={0}
         sx={{ borderBottom: 1, borderColor: 'divider', bgcolor: 'background.paper' }}>
-        <Toolbar sx={{ gap: 1.5 }}>
+        <Toolbar sx={{ gap: 1.25, flexWrap: { xs: 'wrap', sm: 'nowrap' },
+          py: { xs: 1, sm: 0 }, minHeight: { xs: 'auto', sm: 64 } }}>
           <Logo size={34} />
           <Typography variant="h6" sx={{ fontWeight: 800,
             background: BRAND_GRADIENT, WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
@@ -69,50 +74,56 @@ export default function App() {
           </Typography>
           <Chip size="small" label="PIC middle layer" variant="outlined" color="primary"
             sx={{ display: { xs: 'none', sm: 'inline-flex' } }} />
-          <Box sx={{ flexGrow: 1 }} />
-          {funds.length > 0 && (
-            <Select size="small" value={fundId} onChange={(e) => {
-              setFundId(e.target.value)
-              setFocusedPlanId('')
-            }}
-              sx={{ minWidth: 220, fontWeight: 600 }}>
-              {funds.map((f) => (
-                <MenuItem key={f.fund_id} value={f.fund_id}>
-                  {f.name}
-                  <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 1 }}>
-                    {f.category?.replace('Equity - ', '')}
-                  </Typography>
-                </MenuItem>
-              ))}
-            </Select>
-          )}
-          <Chip size="small" variant="outlined"
-            icon={<CircleIcon sx={{ fontSize: '0.7rem !important',
-              color: apiUp === true ? 'success.main' : apiUp === false ? 'error.main' : 'text.disabled' }} />}
-            label={apiUp === true ? 'API' : apiUp === false ? 'Offline' : '…'} />
-          <Tooltip title={mode === 'light' ? 'Dark mode' : 'Light mode'}>
-            <IconButton onClick={toggleMode} color="inherit">
-              {mode === 'light' ? <DarkModeIcon /> : <LightModeIcon />}
-            </IconButton>
-          </Tooltip>
-          <Tooltip title="Reset database (reseed from source data)">
-            <span>
-              <IconButton onClick={handleResetDb} color="inherit" disabled={resetting}>
-                {resetting ? <CircularProgress size={20} color="inherit" /> : <RestartAltIcon />}
+          <Box sx={{ flexGrow: { xs: 0, sm: 1 }, width: { xs: 0, sm: 'auto' } }} />
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0,
+            width: { xs: '100%', sm: 'auto' }, flex: { sm: '0 0 auto' } }}>
+            {funds.length > 0 && (
+              <Select size="small" value={fundId} onChange={(e) => {
+                setFundId(e.target.value)
+                setFocusedPlanId('')
+              }}
+                sx={{ minWidth: { xs: 112, sm: 220 }, flex: { xs: '1 1 120px', sm: '0 0 auto' },
+                  maxWidth: { xs: 'none', sm: 'none' }, fontWeight: 600 }}>
+                {funds.map((f) => (
+                  <MenuItem key={f.fund_id} value={f.fund_id}>
+                    {f.name}
+                    <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 1 }}>
+                      {f.category?.replace('Equity - ', '')}
+                    </Typography>
+                  </MenuItem>
+                ))}
+              </Select>
+            )}
+            <Chip size="small" variant="outlined"
+              icon={<CircleIcon sx={{ fontSize: '0.7rem !important',
+                color: apiUp === true ? 'success.main' : apiUp === false ? 'error.main' : 'text.disabled' }} />}
+              label={apiUp === true ? 'API' : apiUp === false ? 'Offline' : '…'} />
+            <Tooltip title={mode === 'light' ? 'Dark mode' : 'Light mode'}>
+              <IconButton onClick={toggleMode} color="inherit">
+                {mode === 'light' ? <DarkModeIcon /> : <LightModeIcon />}
               </IconButton>
-            </span>
-          </Tooltip>
+            </Tooltip>
+            <Tooltip title="Reset database (reseed from source data)">
+              <span>
+                <IconButton onClick={handleResetDb} color="inherit" disabled={resetting}>
+                  {resetting ? <CircularProgress size={20} color="inherit" /> : <RestartAltIcon />}
+                </IconButton>
+              </span>
+            </Tooltip>
+          </Box>
         </Toolbar>
-        <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ px: 2 }}
+        <Tabs value={tab} onChange={(_, v) => setTab(v)} variant="scrollable"
+          scrollButtons="auto" allowScrollButtonsMobile sx={{ px: { xs: 0.5, sm: 2 }, minHeight: 48,
+            '& .MuiTab-root': { minHeight: 48, py: 0.5, px: { xs: 1, sm: 1.5 } } }}
           textColor="primary" indicatorColor="primary">
-          <Tab label="Trade Planner" />
-          <Tab label="Portfolio" />
-          <Tab label="Trades" />
-          <Tab label="Plan History" />
+          <Tab icon={<CandlestickChartOutlinedIcon />} iconPosition="start" label="Trade Planner" />
+          <Tab icon={<AccountBalanceWalletOutlinedIcon />} iconPosition="start" label="Portfolio" />
+          <Tab icon={<SwapHorizOutlinedIcon />} iconPosition="start" label="Trades" />
+          <Tab icon={<HistoryOutlinedIcon />} iconPosition="start" label="Plan History" />
         </Tabs>
       </AppBar>
 
-      <Container maxWidth="lg" sx={{ py: 3 }}>
+      <Container maxWidth={false} sx={{ py: 3, px: { xs: 1.5, sm: 2.5, xl: 4 } }}>
         {fundId && (
           <>
             {/* Trade Planner stays mounted (hidden via display:none rather than
@@ -120,7 +131,8 @@ export default function App() {
                 back. The other tabs keep remounting per visit, since they rely
                 on that to refetch fresh data. */}
             <Box sx={{ display: tab === 0 ? 'block' : 'none' }}>
-              <TradePlanner fundId={fundId} onContinueToEmail={continueToEmail} />
+              <TradePlanner fundId={fundId} funds={funds} onChangeFundId={setFundId}
+                onContinueToEmail={continueToEmail} />
             </Box>
             {tab !== 0 && (
               <Fade in key={`${tab}-${fundId}`} timeout={350}>

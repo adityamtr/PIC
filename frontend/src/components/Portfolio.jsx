@@ -4,6 +4,13 @@ import {
   TableCell, TableHead, TableRow, Typography,
 } from '@mui/material'
 import LockIcon from '@mui/icons-material/LockOutlined'
+import AccountBalanceWalletOutlinedIcon from '@mui/icons-material/AccountBalanceWalletOutlined'
+import ShowChartOutlinedIcon from '@mui/icons-material/ShowChartOutlined'
+import PaymentsOutlinedIcon from '@mui/icons-material/PaymentsOutlined'
+import PublicOutlinedIcon from '@mui/icons-material/PublicOutlined'
+import TableChartOutlinedIcon from '@mui/icons-material/TableChartOutlined'
+import PieChartOutlineOutlinedIcon from '@mui/icons-material/PieChartOutlineOutlined'
+import GppGoodOutlinedIcon from '@mui/icons-material/GppGoodOutlined'
 import { api } from '../api'
 import { fmtCrValue, fmtPct, fmtRupee } from '../format'
 import { KpiGrid, Panel, ScrollX, Stat } from './ui'
@@ -42,17 +49,17 @@ export default function Portfolio({ fundId }) {
     <Stack spacing={2.5}>
       {/* KPIs — the fund's headline number leads with an accent rail */}
       <KpiGrid>
-        <Stat accent label={fund.name} value={fmtCrValue(fund.aum_cr, 0)} sub={`AUM · ${fund.category}`} color="primary.main" />
-        <Stat label="NAV (Direct-Growth)" value={fmtRupee(fund.nav)} sub={`${fund.holdings_count} holdings`} />
-        <Stat label="Cash & Equivalents" value={fmtCrValue(cash.total_cash_cr, 0)} sub={`${fmtPct(cash.cash_pct)} of AUM`} color="secondary.main" />
-        <Stat label="Benchmark" value={fund.benchmark} sub={`Mgr: ${fund.fund_manager}`} />
+        <Stat accent icon={<AccountBalanceWalletOutlinedIcon />} label={fund.name} value={fmtCrValue(fund.aum_cr, 0)} sub={`AUM · ${fund.category}`} color="primary.main" />
+        <Stat icon={<ShowChartOutlinedIcon />} label="NAV (Direct-Growth)" value={fmtRupee(fund.nav)} sub={`${fund.holdings_count} holdings`} />
+        <Stat icon={<PaymentsOutlinedIcon />} label="Cash & Equivalents" value={fmtCrValue(cash.total_cash_cr, 0)} sub={`${fmtPct(cash.cash_pct)} of AUM`} color="secondary.main" />
+        <Stat icon={<PublicOutlinedIcon />} label="Benchmark" value={fund.benchmark} sub={`Mgr: ${fund.fund_manager}`} />
       </KpiGrid>
 
       {/* Bento: Holdings is the hero (wide, highlighted); exposure + compliance
           ride in a side rail that collapses under it on small screens. */}
       <Box sx={{ display: 'grid', gap: 2.5, alignItems: 'start',
         gridTemplateColumns: { xs: '1fr', lg: '1.6fr 1fr' } }}>
-        <Panel highlight title="Holdings"
+        <Panel highlight icon={<TableChartOutlinedIcon />} title="Holdings"
           action={(
             <Chip label={showAll ? 'Show top 10' : `Show all ${holdings.count}`} size="small"
               variant="outlined" onClick={() => setShowAll(!showAll)} clickable />
@@ -88,11 +95,11 @@ export default function Portfolio({ fundId }) {
         </Panel>
 
         <Stack spacing={2.5}>
-          <Panel title="Sector Exposure">
+          <Panel icon={<PieChartOutlineOutlinedIcon />} title="Sector Exposure">
             <SectorDonut sectors={sectors.sectors} />
           </Panel>
 
-          <Panel title="Compliance — Top Utilisation">
+          <Panel icon={<GppGoodOutlinedIcon />} title="Compliance — Top Utilisation">
             {[...compliance.utilization.issuers.slice(0, 3).map((r) => ({ ...r, kind: 'Issuer' })),
               ...compliance.utilization.sectors.slice(0, 2).map((r) => ({ ...r, kind: 'Sector' }))]
               .map((r) => (

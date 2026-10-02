@@ -24,8 +24,9 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
-from . import data_v2, db, email_draft, forecast, planner
+from . import assistant, data, data_v2, db, email_draft, forecast, planner
 from .schemas import (
+    AssistantChatRequest, AssistantChatResponse, AssistantInterpretRequest,
     DecisionRequest, DecisionResponse, EmailDraftResponse, IntentRequest,
     SendEmailRequest, SentEmailResponse,
 )
@@ -357,6 +358,49 @@ def get_trade_plan(plan_id: str):
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
     return plan
+
+
+@app.post("/api/assistant/interpret")
+def interpret_trade_intent(req: AssistantInterpretRequest):
+    funds = data_v2.list_funds()
+    sectors = set(data.BUY_ALLOCATION)
+    securities = {security["ticker"] for security in data.UNIVERSE}
+    for fund in funds:
+        dataset = data_v2.get_ds(fund["fund_id"])
+        sectors.update(
+            holding.get("sector") for holding in dataset["holdings"] if holding.get("sector")
+        )
+        securities.update(holding["ticker"] for holding in dataset["holdings"] if holding.get("ticker"))
+    try:
+        return assistant.interpret_intent(
+            req.message,
+            req.draft,
+            funds,
+            sorted(sectors),
+            sorted(securities),
+        )
+    except assistant.AssistantConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except assistant.AssistantGenerationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/trade-plan/{plan_id}/assistant-chat", response_model=AssistantChatResponse)
+def chat_about_trade_plan(plan_id: str, req: AssistantChatRequest):
+    plan = _load_plan(plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    try:
+        result = assistant.chat_about_plan(
+            req.message,
+            [item.model_dump() for item in req.history],
+            plan,
+        )
+    except assistant.AssistantConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except assistant.AssistantGenerationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return AssistantChatResponse(plan_id=plan_id, **result.model_dump())
 
 
 @app.post("/api/trade-plan/{plan_id}/email-draft", response_model=EmailDraftResponse)
