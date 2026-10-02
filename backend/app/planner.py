@@ -98,7 +98,9 @@ def _sector_for(ds, ticker):
 
 
 def _order(ds, ticker, side, rupees=None, shares=None):
-    price = _price_for(ds, ticker)
+    holding = data.holding(ds, ticker) if side == "SELL" else None
+    holding_price = holding.get("price") if holding else None
+    price = holding_price if _usable_price(holding_price) else _price_for(ds, ticker)
     if shares is None:
         shares = int(rupees // price) if price else 0
     return {
@@ -911,7 +913,10 @@ def _estimate_post_trade_risk_return(ds, orders, target_volatility, action, amou
     aum = ds["aum"] or 1.0
     post_aum = aum + amount if action == "contribution" else aum
     if action == "redemption":
-        post_aum = max(aum - amount, 1.0)
+        planned_redemption = sum(
+            max(o.get("est_value", 0.0), 0.0) for o in orders if o.get("side") == "SELL"
+        )
+        post_aum = max(aum - planned_redemption, 1.0)
 
     metrics_by_isin, metrics_by_ticker, isin_by_ticker = _historical_stock_context(ds)
     all_tickers = list(dict.fromkeys(current_value.keys() | post_value.keys()))
@@ -1398,6 +1403,21 @@ def iter_plan_steps(fund_id, intent):
     policy_result = policy.evaluate(ds, orders, cfp, horizon, tax_context=tax_context)
     risks.extend(policy_result["risk_flags"])
     warnings.extend(policy_result["warnings"])
+    redemption_requested = amount if action == "redemption" else 0.0
+    redemption_planned = sum(
+        max(o.get("est_value", 0.0), 0.0) for o in orders if action == "redemption" and o.get("side") == "SELL"
+    )
+    redemption_shortfall = max(redemption_requested - redemption_planned, 0.0)
+    shortfall_threshold = max(1_000_000.0, redemption_requested * 0.001)
+    if action == "redemption" and redemption_shortfall > shortfall_threshold:
+        shortfall_message = (
+            f"Redemption shortfall: requested ₹{_cr(redemption_requested):,.2f} Cr, "
+            f"planned sell orders raise ₹{_cr(redemption_planned):,.2f} Cr; "
+            f"₹{_cr(redemption_shortfall):,.2f} Cr remains unfulfilled."
+        )
+        warnings.append(shortfall_message)
+        risks.append({"type": "redemption_shortfall", "severity": "HIGH",
+                      "message": shortfall_message})
     _fail_ct = sum(1 for c in compliance if c["status"] == "FAIL")
     _warn_ct = sum(1 for c in compliance if c["status"] == "WARN")
     _high_risk_ct = sum(1 for r in risks if r.get("severity") == "HIGH")
@@ -1489,6 +1509,9 @@ def iter_plan_steps(fund_id, intent):
             "net_cash_after_tax": round(net_cash_after_tax, 2),
             "net_cash_after_tax_cr": round(net_cash_after_tax / CRORE, 4),
             "investable_amount": investable,
+            "redemption_requested_cr": round(redemption_requested / CRORE, 2) if action == "redemption" else None,
+            "redemption_planned_cr": round(redemption_planned / CRORE, 2) if action == "redemption" else None,
+            "redemption_shortfall_cr": round(redemption_shortfall / CRORE, 2) if action == "redemption" else None,
             "est_total_tax": tax_context["est_total_tax"],
             "est_total_tax_cr": round(tax_context["est_total_tax"] / CRORE, 4),
             "tax_drag_bps": tax_context["tax_drag_bps"],

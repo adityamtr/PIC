@@ -1,7 +1,7 @@
 import unittest
 from datetime import date
 
-from app import data, optimizer, policy, tax_lots, tax_rules
+from app import data, optimizer, planner, policy, tax_lots, tax_rules
 
 
 class TaxRulesTests(unittest.TestCase):
@@ -78,6 +78,18 @@ class TaxLotsTests(unittest.TestCase):
 
 
 class OptimizerTaxAwareTests(unittest.TestCase):
+    def test_sell_order_uses_holding_price_when_universe_quote_differs(self):
+        holding = {
+            "ticker": "HDFCBANK", "name": "HDFC Bank", "sector": "Financial Services",
+            "price": 731.0, "market_value": 100_000.0,
+        }
+        ds = {"holdings_by_ticker": {"HDFCBANK": holding}}
+
+        order = planner._order(ds, "HDFCBANK", "SELL", shares=100)
+
+        self.assertEqual(order["price"], 731.0)
+        self.assertEqual(order["est_value"], 73_100.0)
+
     def setUp(self):
         if not optimizer.available():
             self.skipTest("cvxpy not installed")

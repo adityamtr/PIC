@@ -1,60 +1,63 @@
-import { Box, Stack, Typography, useTheme } from '@mui/material'
+import { Box, Stack, Tooltip, Typography, useTheme } from '@mui/material'
 import { fmtPct } from '../format'
 
-function MetricDonut({ label, before, after, reference }) {
+function MetricBars({ label, before, after, reference }) {
   const theme = useTheme()
-  const size = 156, center = size / 2
-  const scale = Math.max(Math.abs(before || 0), Math.abs(after || 0), Math.abs(reference || 0), 0.01) * 1.1
-  const rings = [
-    { name: 'After', value: after, radius: 59, color: theme.palette.secondary.main },
-    { name: 'Before', value: before, radius: 42, color: theme.palette.primary.main },
+  const series = [
+    { name: 'Before', value: before, color: theme.palette.primary.main },
+    { name: 'After', value: after, color: theme.palette.secondary.main },
   ]
-  const afterText = after == null ? '—' : fmtPct(after * 100, 1)
-  const formatValue = (value) => value == null ? '—' : fmtPct(value * 100, 2)
+  const values = [...series.map(({ value }) => value), reference].filter((value) => value != null)
+  const min = Math.min(0, ...values)
+  const max = Math.max(0, ...values)
+  const range = Math.max(max - min, 0.01)
+  const zero = ((0 - min) / range) * 100
+  const position = (value) => ((value - min) / range) * 100
+  const referencePosition = reference == null ? null : position(reference)
 
   return (
-    <Box sx={{ display: 'grid', gridTemplateColumns: '156px minmax(0, 1fr)', gap: 1.5, alignItems: 'center' }}>
-      <Box sx={{ position: 'relative', width: size, height: size, flexShrink: 0 }}>
-        <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img"
-          aria-label={`${label}: before ${formatValue(before)}, after ${formatValue(after)}`}>
-          {rings.map((ring) => {
-            const circumference = 2 * Math.PI * ring.radius
-            const fraction = ring.value == null ? 0 : Math.min(Math.abs(ring.value) / scale, 1)
-            return (
-              <g key={ring.name} transform={`rotate(-90 ${center} ${center})`}>
-                <circle cx={center} cy={center} r={ring.radius} fill="none"
-                  stroke={theme.palette.divider} strokeWidth="10" opacity="0.45" />
-                {fraction > 0 && (
-                  <circle cx={center} cy={center} r={ring.radius} fill="none"
-                    stroke={ring.color} strokeWidth="10" strokeLinecap="round"
-                    strokeDasharray={`${circumference * fraction} ${circumference}`} />
-                )}
-              </g>
-            )
-          })}
-        </svg>
-        <Box sx={{ position: 'absolute', inset: 0, display: 'grid', placeContent: 'center', textAlign: 'center' }}>
-          <Typography variant="subtitle2" fontWeight={700} sx={{ fontVariantNumeric: 'tabular-nums' }}>
-            {afterText}
-          </Typography>
-          <Typography variant="caption" color="text.secondary">after</Typography>
-        </Box>
-      </Box>
-      <Stack spacing={1} sx={{ minWidth: 0 }}>
-        <Typography variant="subtitle2" fontWeight={700}>{label}</Typography>
-        {rings.map((ring) => (
-          <Stack key={ring.name} direction="row" spacing={0.75} alignItems="center" justifyContent="space-between">
-            <Stack direction="row" spacing={0.75} alignItems="center" sx={{ minWidth: 0 }}>
-              <Box sx={{ width: 9, height: 9, borderRadius: '50%', bgcolor: ring.color, flexShrink: 0 }} />
-              <Typography variant="body2" color="text.secondary">{ring.name}</Typography>
-            </Stack>
-            <Typography variant="body2" fontWeight={600} sx={{ fontVariantNumeric: 'tabular-nums' }}>
-              {formatValue(ring.value)}
-            </Typography>
-          </Stack>
-        ))}
+    <Stack spacing={1} sx={{ minWidth: 0 }}>
+      <Typography variant="subtitle2" fontWeight={700}>{label}</Typography>
+      <Stack spacing={1}>
+        {series.map((item) => {
+          const start = item.value == null ? zero : Math.min(zero, position(item.value))
+          const end = item.value == null ? zero : Math.max(zero, position(item.value))
+          return (
+            <Box key={item.name} sx={{ display: 'grid', gridTemplateColumns: '48px minmax(0, 1fr) 58px', gap: 1, alignItems: 'center' }}>
+              <Typography variant="caption" color="text.secondary">{item.name}</Typography>
+              <Tooltip title={`${label} · ${item.name}: ${item.value == null ? 'unavailable' : fmtPct(item.value * 100, 2)}`}>
+                <Box tabIndex={0} role="img"
+                  aria-label={`${label}, ${item.name}: ${item.value == null ? 'unavailable' : fmtPct(item.value * 100, 2)}`}
+                  sx={{ position: 'relative', height: 16, cursor: 'default', '&:hover .metric-bar, &:focus-visible .metric-bar': { opacity: 1, filter: 'brightness(1.12)' } }}>
+                  <Box sx={{ position: 'absolute', inset: '6px 0', bgcolor: 'action.hover', borderRadius: 1 }} />
+                  <Box sx={{ position: 'absolute', top: 3, bottom: 3, left: `${zero}%`, width: '1px', bgcolor: 'text.disabled' }} />
+                  {referencePosition != null && (
+                    <Box sx={{ position: 'absolute', top: 1, bottom: 1, left: `${referencePosition}%`, borderLeft: '1px dashed', borderColor: 'text.secondary' }} />
+                  )}
+                  {item.value != null && (
+                    <Box className="metric-bar" sx={{ position: 'absolute', top: 3, bottom: 3,
+                      left: `${start}%`, width: `${Math.max(end - start, 0.7)}%`, minWidth: 2,
+                      bgcolor: item.color, borderRadius: 0.5, opacity: 0.84,
+                      transition: 'opacity 120ms ease, filter 120ms ease' }} />
+                  )}
+                </Box>
+              </Tooltip>
+              <Typography variant="caption" fontWeight={600} textAlign="right"
+                sx={{ fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
+                {item.value == null ? '—' : fmtPct(item.value * 100, 2)}
+              </Typography>
+            </Box>
+          )
+        })}
       </Stack>
-    </Box>
+      <Stack direction="row" justifyContent="space-between" sx={{ pl: '56px', pr: '66px' }}>
+        <Typography variant="caption" color="text.disabled">{fmtPct(min * 100, 1)}</Typography>
+        {reference != null && (
+          <Typography variant="caption" color="text.secondary">Strategy limit {fmtPct(reference * 100, 2)}</Typography>
+        )}
+        <Typography variant="caption" color="text.disabled">{fmtPct(max * 100, 1)}</Typography>
+      </Stack>
+    </Stack>
   )
 }
 
@@ -69,9 +72,9 @@ export default function RiskReturnComparison({ metrics }) {
 
   return (
     <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' }, gap: 2 }}>
-      <MetricDonut label="Annualized volatility" before={beforeVolatility} after={afterVolatility}
+      <MetricBars label="Annualized volatility" before={beforeVolatility} after={afterVolatility}
         reference={metrics.fund_strategy_band?.volatility_high} />
-      <MetricDonut label="Annualized return" before={beforeReturn} after={afterReturn}
+      <MetricBars label="Annualized return" before={beforeReturn} after={afterReturn}
         reference={metrics.fund_strategy_band?.return_high} />
       <Typography variant="caption" color="text.secondary" sx={{ gridColumn: '1 / -1' }}>
         Historical stock returns and covariance are weighted by fund AUM; cash is treated as zero-return and zero-volatility.

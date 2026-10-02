@@ -665,6 +665,13 @@ export default function TradePlanner({ fundId }) {
       {plan && (
         <Grow in timeout={450}>
           <Stack spacing={2.5}>
+            {s.redemption_shortfall_cr > 0 && (
+              <Alert severity="warning" variant="outlined">
+                <strong>Redemption not fully funded:</strong> requested {fmtCrValue(s.redemption_requested_cr)};
+                planned sell orders raise {fmtCrValue(s.redemption_planned_cr)};
+                shortfall {fmtCrValue(s.redemption_shortfall_cr)}.
+              </Alert>
+            )}
             <Stack direction="row" justifyContent="flex-end" sx={{ mb: -1.5 }}>
               <Tooltip title="Close generated plan">
                 <IconButton size="small" onClick={closePlan} aria-label="Close generated plan">
@@ -739,6 +746,12 @@ export default function TradePlanner({ fundId }) {
               </Alert>
             )}
             <AdditionalPlanNotes warnings={plan.warnings || []} riskFlags={plan.risk_flags || []} />
+
+            {plan.risk_return && (
+              <Panel title="Risk & Return: Before vs After Plan">
+                <RiskReturnComparison metrics={plan.risk_return} />
+              </Panel>
+            )}
 
             {/* Bento: the generated orders are the hero (wide, highlighted);
                 cash-flow + pending context ride a side rail. */}
@@ -888,11 +901,6 @@ export default function TradePlanner({ fundId }) {
               </Typography>
             </Panel>
 
-            {plan.risk_return && (
-              <Panel title="Risk & Return: Before vs After Plan">
-                <RiskReturnComparison metrics={plan.risk_return} />
-              </Panel>
-            )}
           </Stack>
         </Grow>
       )}
