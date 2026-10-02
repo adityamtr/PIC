@@ -6,7 +6,7 @@ import { BRAND_GRADIENT } from '../theme'
 export function KpiGrid({ children, min = 200, sx }) {
   return (
     <Box sx={{ display: 'grid', gap: 2,
-      gridTemplateColumns: `repeat(auto-fit, minmax(${min}px, 1fr))`, ...sx }}>
+      gridTemplateColumns: `repeat(auto-fit, minmax(min(100%, ${min}px), 1fr))`, ...sx }}>
       {children}
     </Box>
   )
@@ -14,7 +14,7 @@ export function KpiGrid({ children, min = 200, sx }) {
 
 // A single KPI tile. `accent` draws the brand gradient rail to flag the
 // headline metric among its peers.
-export function Stat({ label, value, sub, color, accent }) {
+export function Stat({ label, value, sub, color, accent, icon }) {
   return (
     <Card sx={{
       position: 'relative', overflow: 'hidden',
@@ -26,11 +26,19 @@ export function Stat({ label, value, sub, color, accent }) {
       }),
     }}>
       <CardContent sx={{ py: 1.75, pl: accent ? 2.5 : 2 }}>
-        <Typography variant="caption" color="text.secondary"
-          sx={{ textTransform: 'uppercase', letterSpacing: 0.4, fontWeight: 600 }}>
-          {label}
-        </Typography>
-        <Typography variant="h6" sx={{ color, fontWeight: 700, mt: 0.25, lineHeight: 1.3 }}>{value}</Typography>
+        <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
+          <Typography variant="caption" color="text.secondary"
+            sx={{ minWidth: 0, textTransform: 'uppercase', fontWeight: 600 }}>
+            {label}
+          </Typography>
+          {icon && <Box aria-hidden="true" sx={{
+            width: 30, height: 30, flexShrink: 0, display: 'grid', placeItems: 'center',
+            borderRadius: 1, color: color || 'primary.main', bgcolor: 'action.hover',
+            '& .MuiSvgIcon-root': { fontSize: 18 },
+          }}>{icon}</Box>}
+        </Stack>
+        <Typography variant="h6" sx={{ color, fontWeight: 700, mt: 0.25, lineHeight: 1.3,
+          overflowWrap: 'anywhere', fontVariantNumeric: 'tabular-nums' }}>{value}</Typography>
         {sub && <Typography variant="caption" color="text.secondary">{sub}</Typography>}
       </CardContent>
     </Card>
@@ -40,7 +48,7 @@ export function Stat({ label, value, sub, color, accent }) {
 // A titled panel used across the bento layouts. `highlight` adds a gradient
 // top-rail and a stronger shadow so the most important section on a page pulls
 // the eye. It stretches to fill its grid cell (height 100%).
-export function Panel({ title, subtitle, action, highlight, sx, bodySx, children }) {
+export function Panel({ title, subtitle, action, highlight, icon, sx, bodySx, children }) {
   return (
     <Card sx={{
       height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden',
@@ -54,8 +62,15 @@ export function Panel({ title, subtitle, action, highlight, sx, bodySx, children
         {(title || action) && (
           <Stack direction="row" alignItems="center" justifyContent="space-between"
             sx={{ mb: subtitle ? 0.25 : 1.5, gap: 1 }}>
-            <Typography variant="subtitle2" color="text.secondary"
-              sx={{ textTransform: 'uppercase' }}>{title}</Typography>
+            <Stack direction="row" alignItems="center" spacing={0.9} sx={{ minWidth: 0, flex: 1 }}>
+              {icon && <Box aria-hidden="true" sx={{
+                width: 28, height: 28, flexShrink: 0, display: 'grid', placeItems: 'center',
+                borderRadius: 1, color: 'primary.main', bgcolor: 'action.hover',
+                '& .MuiSvgIcon-root': { fontSize: 18 },
+              }}>{icon}</Box>}
+              <Typography variant="subtitle2" color="text.secondary"
+                sx={{ minWidth: 0, textTransform: 'uppercase', lineHeight: 1.35 }}>{title}</Typography>
+            </Stack>
             {action}
           </Stack>
         )}

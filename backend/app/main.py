@@ -24,8 +24,9 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
-from . import data_v2, db, email_draft, forecast, planner
+from . import assistant, data, data_v2, db, email_draft, forecast, planner
 from .schemas import (
+    AssistantChatRequest, AssistantChatResponse, AssistantInterpretRequest,
     DecisionRequest, DecisionResponse, EmailDraftResponse, IntentRequest,
     SendEmailRequest, SentEmailResponse,
 )
@@ -329,17 +330,25 @@ def list_trade_plans(fund_id: str | None = Query(None)):
     # two must stay distinguishable so a reset doesn't get backfilled by stale
     # in-memory plans from before the reset.
     plans = db.list_plans(fund_id)
-    if plans is not None:
-        ordered = sorted(plans, key=lambda plan: plan.get("created_at") or "", reverse=True)
-        return {"plans": ordered, "count": len(ordered)}
-    # DB unreachable: in-memory cache is the only thing we have. Only plans with
-    # a recorded decision count as "history" (matches the DB path, where a plan
-    # is written only once decided).
-    in_memory = [
-        plan for plan in _PLANS.values()
-        if plan.get("decision") and (fund_id is None or plan.get("fund", {}).get("fund_id") == fund_id)
+    if plans is None:
+        # DB unreachable: in-memory cache is the only thing we have. Only plans
+        # with a recorded decision count as "history" (matches the DB path).
+        plans = [
+            plan for plan in _PLANS.values()
+            if plan.get("decision") and (fund_id is None or plan.get("fund", {}).get("fund_id") == fund_id)
+        ]
+    ordered = sorted(plans, key=lambda plan: plan.get("created_at") or "", reverse=True)
+    email_summaries = db.list_sent_email_summaries() or {}
+    ordered = [
+        {
+            **plan,
+            **email_summaries.get(plan.get("plan_id"), {
+                "sent_email_count": 0,
+                "last_sent_email_at": None,
+            }),
+        }
+        for plan in ordered
     ]
-    ordered = sorted(in_memory, key=lambda plan: plan.get("created_at") or "", reverse=True)
     return {"plans": ordered, "count": len(ordered)}
 
 
@@ -351,15 +360,58 @@ def get_trade_plan(plan_id: str):
     return plan
 
 
+@app.post("/api/assistant/interpret")
+def interpret_trade_intent(req: AssistantInterpretRequest):
+    funds = data_v2.list_funds()
+    sectors = set(data.BUY_ALLOCATION)
+    securities = {security["ticker"] for security in data.UNIVERSE}
+    for fund in funds:
+        dataset = data_v2.get_ds(fund["fund_id"])
+        sectors.update(
+            holding.get("sector") for holding in dataset["holdings"] if holding.get("sector")
+        )
+        securities.update(holding["ticker"] for holding in dataset["holdings"] if holding.get("ticker"))
+    try:
+        return assistant.interpret_intent(
+            req.message,
+            req.draft,
+            funds,
+            sorted(sectors),
+            sorted(securities),
+        )
+    except assistant.AssistantConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except assistant.AssistantGenerationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/trade-plan/{plan_id}/assistant-chat", response_model=AssistantChatResponse)
+def chat_about_trade_plan(plan_id: str, req: AssistantChatRequest):
+    plan = _load_plan(plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    try:
+        result = assistant.chat_about_plan(
+            req.message,
+            [item.model_dump() for item in req.history],
+            plan,
+        )
+    except assistant.AssistantConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except assistant.AssistantGenerationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return AssistantChatResponse(plan_id=plan_id, **result.model_dump())
+
+
 @app.post("/api/trade-plan/{plan_id}/email-draft", response_model=EmailDraftResponse)
 def generate_trade_plan_email(plan_id: str):
     plan = _load_plan(plan_id)
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
     decision = (plan.get("decision") or {}).get("decision")
-    is_approved = decision == "Approve" if decision else str(plan.get("status", "")).lower().startswith("approved")
-    if not is_approved:
-        raise HTTPException(status_code=409, detail="Email drafts are available only for approved plans")
+    decision = decision or ("Approve" if str(plan.get("status", "")).lower().startswith("approved") else None)
+    if decision not in {"Approve", "Reject", "Escalate"}:
+        raise HTTPException(status_code=409, detail="Email drafts are available after approval, rejection, or escalation")
     try:
         draft = email_draft.generate_email_template(plan)
     except email_draft.EmailDraftConfigurationError as exc:
@@ -375,9 +427,9 @@ def send_trade_plan_email(plan_id: str, content: SendEmailRequest):
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
     decision = (plan.get("decision") or {}).get("decision")
-    is_approved = decision == "Approve" if decision else str(plan.get("status", "")).lower().startswith("approved")
-    if not is_approved:
-        raise HTTPException(status_code=409, detail="Emails can be sent only for approved plans")
+    decision = decision or ("Approve" if str(plan.get("status", "")).lower().startswith("approved") else None)
+    if decision not in {"Approve", "Reject", "Escalate"}:
+        raise HTTPException(status_code=409, detail="Emails can be sent after approval, rejection, or escalation")
     sent_at = datetime.now(timezone.utc).isoformat()
     sent_email = db.create_sent_email({
         "plan_id": plan_id,
@@ -406,7 +458,7 @@ def decide_trade_plan(plan_id: str, req: DecisionRequest):
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
     status_map = {
-        "Approve": "Approved — sent to Trading", "Modify": "Returned for Modification",
+        "Approve": "Approved — sent to Trading",
         "Reject": "Rejected", "Escalate": "Escalated to PIC Lead / PM",
     }
     new_status = status_map[req.decision]

@@ -4,6 +4,10 @@ import {
   TableCell, TableHead, TableRow, Typography,
 } from '@mui/material'
 import { api } from '../api'
+import CurrencyExchangeOutlinedIcon from '@mui/icons-material/CurrencyExchangeOutlined'
+import TimelineOutlinedIcon from '@mui/icons-material/TimelineOutlined'
+import PendingActionsOutlinedIcon from '@mui/icons-material/PendingActionsOutlined'
+import TaskAltOutlinedIcon from '@mui/icons-material/TaskAltOutlined'
 import { fmtCrValue, fmtNum, fmtRupee } from '../format'
 import { Panel, ScrollX } from './ui'
 
@@ -82,7 +86,7 @@ export default function Trades({ fundId }) {
       {/* Summary bento: a hero net-impact tile beside the cycle breakdown. */}
       <Box sx={{ display: 'grid', gap: 2.5, alignItems: 'stretch',
         gridTemplateColumns: { xs: '1fr', md: '1fr 1.4fr' } }}>
-        <Panel highlight title="Net Settlement Impact" bodySx={{ display: 'flex', flexDirection: 'column' }}>
+        <Panel highlight icon={<CurrencyExchangeOutlinedIcon />} title="Net Settlement Impact" bodySx={{ display: 'flex', flexDirection: 'column' }}>
           <Typography variant="h3" fontWeight={800}
             sx={{ color: pending.net_cash_impact_cr < 0 ? 'error.main' : 'success.main', lineHeight: 1.1 }}>
             {fmtCrValue(pending.net_cash_impact_cr)}
@@ -93,7 +97,7 @@ export default function Trades({ fundId }) {
           </Typography>
         </Panel>
 
-        <Panel title="By Settlement Cycle">
+        <Panel icon={<TimelineOutlinedIcon />} title="By Settlement Cycle">
           <Stack spacing={1.75} sx={{ mt: 0.5 }}>
             {pending.by_cycle.map((c) => (
               <Box key={c.cycle}>
@@ -115,13 +119,13 @@ export default function Trades({ fundId }) {
       </Box>
 
       {/* Actionable hero: unsettled trades */}
-      <Panel highlight title="Pending / Unsettled Trades"
+      <Panel highlight icon={<PendingActionsOutlinedIcon />} title="Pending / Unsettled Trades"
         subtitle="Cash committed but not yet moved. Settlement follows the Indian T+1 rolling cycle (some legs T+2).">
         <TradeTable trades={pending.trades} showStatus />
       </Panel>
 
       {/* Secondary: settled history, visually de-emphasised */}
-      <Panel title="Previously Executed (Settled) Trades" sx={{ bgcolor: 'action.hover' }}>
+      <Panel icon={<TaskAltOutlinedIcon />} title="Previously Executed (Settled) Trades" sx={{ bgcolor: 'action.hover' }}>
         <TradeTable trades={executed.trades} showStatus />
       </Panel>
     </Stack>

@@ -184,7 +184,7 @@ def _suggestions(results: list[Result]) -> list[str]:
         )
     if blocked["LIQUIDITY-ADV"] or blocked["LIQUIDITY-SPREAD"]:
         suggestions.append(
-            "Keep the 5% ADV warning and 10% single-day participation target; allow a "
+            "Keep the 10% ADV warning and 75% daily escalation ceiling; allow a "
             "scheduled parent plan up to 75% ADV, split across sessions, and hard-block "
             "only above 75%."
         )

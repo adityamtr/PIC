@@ -1,191 +1,212 @@
 # Final Plan Generation Rules
 
-This document describes every rule applied while generating a trade plan in the
-PIC platform. Rules fall into **two distinct layers**:
+This document describes the rules applied when PIC constructs, checks, and
+displays a trade plan. There are three decision layers:
 
-- **Layer A — constraints baked into the convex optimization.** Enforced
-  mathematically by the CVXPY solver while the trades are being constructed. The
-  optimizer cannot propose a solution that violates them (subject to the
-  relaxation ladder below).
-- **Layer B — policy / compliance rules checked after trades are proposed.**
-  Re-checked independently against the **post-trade** book. These produce
-  `PASS` / `WARN` / `BLOCK` / `ESCALATE` results.
+1. **Convex optimizer:** applies allocation constraints while selecting trades.
+2. **Post-trade checks:** re-evaluate the rounded orders, policy rules, and the
+   legacy concentration summary.
+3. **Plan gate and UI:** combine those results into `PASS`, `WARN`, `ESCALATE`,
+   or `BLOCKED`, then display the reasons to the user.
 
-> **A suggestion from the optimizer is not approval.** Every plan runs the full
-> post-trade policy gauntlet and comes back as `Pending PIC Review`. A blocked
-> plan is returned for review, not silently discarded.
+The optimizer proposes an allocation; it does not approve or execute trades.
+Manual and rule-based plans also run through the post-trade checks. Generated
+plans are returned for PIC review, including plans that are blocked.
 
-Source code: [`optimizer.py`](../backend/app/optimizer.py),
-[`planner.py`](../backend/app/planner.py),
-[`policy.py`](../backend/app/policy.py).
+Sources: [optimizer.py](../backend/app/optimizer.py),
+[planner.py](../backend/app/planner.py),
+[policy.py](../backend/app/policy.py), and
+[TradePlanner.jsx](../frontend/src/components/TradePlanner.jsx).
 
----
+## 1. Rules Inside Convex Optimization
 
-## Layer A — Rules enforced *inside* the convex optimization
+Money variables are scaled to crore while solving. Fund mandate limits are
+resolved by fund ID from the database when available, with in-code values as
+fallbacks. Exposure caps use the projected portfolio and an AUM basis appropriate
+to the action. A small solver-scale margin protects against numerical tolerance.
 
-Encoded as hard constraints in the CVXPY programs. Money terms are scaled to
-crore before solving for numerical stability.
+### Buy and contribution: `optimize_buy`
 
-### A.1 Buy / Contribution — `optimize_buy`
+**Objective:** maximize forecast expected return of deployed capital.
 
-**Objective:** maximize forecast expected return of deployed capital
-(`Maximize(ret @ buy)`).
-
-| Rule | Constraint |
+| Rule | How it is applied |
 |---|---|
-| Full deployment | `sum(buy) == amount` — the whole ticket must be allocated |
-| Long-only | `buy >= 0` — no negative / short buys |
-| Per-issuer cap | `cur + buy <= issuer_cap` — existing + proposed stays within the fund's single-issuer limit |
-| Per-sector cap | `sector_current + sum(buy_in_sector) <= sector_cap` |
-| Per-name diversification | `buy <= 34% of ticket` — no single name takes most of the buy |
+| Requested amount | `sum(buy) == amount`; the continuous solution allocates the requested ticket. |
+| Long-only | Buy variables cannot be negative. |
+| Single issuer | Existing plus proposed issuer value is capped at that fund's database-backed single-issuer limit. |
+| Sector | Projected sector value is capped at the active fund's sector limit. |
+| Business group | Projected group value is capped at the active fund's group limit. |
+| Country | Projected country value is capped at the applicable home, foreign, or emerging-country limit. |
+| Cash | Total deployment cannot exceed the policy cash budget: 95% of existing operational cash plus 100% of the new subscription. |
+| Diversification | Initially, no name receives more than 34% of the requested buy amount. This is a construction preference, not a compliance limit. |
+| Risk | When risk data and a target are supplied, a convex portfolio-volatility ceiling is applied as a preference. |
 
-- Caps are measured against **post-trade AUM** for a contribution
-  (pre-trade AUM + deployed cash); against current AUM for other buys.
-- **Relaxation ladder when infeasible:** drop the 34% per-name cap → then drop
-  the sector cap (issuer cap always kept) → else fall back to the rule-based
-  path. Any residual sector breach is surfaced by the policy layer afterward.
+For a contribution, issuer, sector, group, and country limits use post-contribution
+AUM; other buys use current AUM. On infeasibility, the optimizer first relaxes
+the 34% per-name diversification cap, then may relax the optional risk ceiling.
+The planner's context-aware solve keeps the hard exposure and cash limits. If no
+feasible solve is found, the planner falls back to its rule-based path and the
+same final checks still apply.
 
-### A.2 Sell / Redemption — `optimize_sell`
+Buy candidates are screened before solving for hard trade exclusions, including
+restricted or encumbered securities, configured ESG exclusions, stale prices,
+spread above the blocking threshold when ADV data is present, and foreign-
+currency exposure above its blocking threshold. Warning-only conditions are not
+candidate exclusions.
 
-**Objective:** raise the target while giving up the least — minimizes
-`horizon-scaled forecast return + exit tax + transaction cost` per rupee sold
-(tax-aware).
+### Sell and redemption: `optimize_sell`
 
-| Rule | Constraint |
+**Objective:** raise the requested cash while minimizing the forecast return,
+exit tax, and transaction cost given up.
+
+| Rule | How it is applied |
 |---|---|
-| Lock-in respect | `val <= sellable_value` — only *sellable* shares (locked / pledged excluded) |
-| Cannot over-raise | target capped at total sellable value |
-| Per-name cap | `val <= 34% of target` — spreads the raise to limit market impact |
-| Tax-awareness | prefers LTCG / loss lots over short-term winners; loss lots carry a negative tax rate |
+| Sellable shares | Each sell is bounded by sellable shares after pending sells and by the minimum-holding requirement. Restricted, encumbered, stale-price, excessive-spread, or over-limit FX positions are not sell candidates. |
+| Requested raise | The continuous target is capped by total sellable value. Whole-share rounding can leave a small shortfall. |
+| Issuer, sector, group, country | Projected exposure is constrained using the active fund limits and post-redemption AUM basis. |
+| Diversification | Initially, each name contributes no more than 34% of the cash target; this preference may be relaxed when capacity is insufficient. |
+| Tax and transaction costs | The objective prefers lower-cost exits, including loss lots and LTCG lots where represented by the supplied rates. |
+| Risk | A supplied portfolio-volatility ceiling is attempted as a preference and can be relaxed if needed. |
 
-- The forecast return is scaled over the execution horizon (~21 trading days /
-  month) because tax is a one-time cost while a predicted loss repeats.
-- **Relaxation:** drop the 34% per-name cap if too few names have capacity;
-  available-share limits always remain.
+### Rebalance: `optimize_rebalance`
 
-### A.3 Rebalance — `optimize_rebalance`
+**Objective:** maximize expected return net of estimated exit tax.
 
-**Objective:** maximize expected return net of exit tax.
-
-| Rule | Constraint |
+| Rule | How it is applied |
 |---|---|
-| Cash-neutral | `sum(w) == invested` — stays as invested as it is now |
-| Long-only | `w >= 0` |
-| Per-issuer cap | `w <= issuer_cap` (generic 10%, **not** fund-specific) |
-| Turnover budget | `norm1(w - w_cur) <= 15%` — limits total churn |
-| Tax penalty | realized-gain tax penalizes churning high-tax (short-term winner) positions |
+| Cash-neutral | Total invested weight remains unchanged before share rounding. |
+| Long-only and locked shares | Weights cannot go negative; unsellable shares are preserved. |
+| Issuer, sector, group, country | Uses the active fund's limits, not a generic issuer limit. Sector drift is also limited to 2 percentage points from current sector weight. |
+| Turnover | `sum(abs(w - w_current)) <= 15%` of AUM. |
+| Buy exclusions | A holding marked as blocked for buys cannot be increased. |
+| Tax | Selling positions with higher estimated exit costs is penalized. |
 
-After optimization, planner code ignores rebalance changes below ₹0.25 Cr and
-caps each sale at shares available to sell.
+After optimization, planner code drops rebalance changes below ₹0.25 Cr and
+rounds to whole shares. Sells are capped at available shares and the post-trade
+checks evaluate the resulting orders.
 
----
+### Not hard optimizer constraints
 
-## Layer B — Rules checked *after* trades are proposed
+- Liquidity / ADV thresholds produce `WARN` or `ESCALATE`, not `BLOCK`; they are
+  evaluated after order construction and do not make the convex solve infeasible.
+- The exact UCITS-style 5/40 rule depends on which individual positions cross
+  5%, so it remains a post-trade check rather than a continuous convex constraint.
+- Watchlist escalation, corporate-event warnings, order-count review, and
+  execution-horizon review are post-trade/planning checks.
+- Optional volatility targeting is a preference and may be relaxed; the achieved
+  risk is reported separately from compliance status.
 
-Run in [`policy.py`](../backend/app/policy.py) `evaluate()`, re-checked against
-the **post-trade** book (projected exposures divide by post-trade AUM).
+## 2. Post-Trade Policy Checks
 
-### B.1 Concentration checks (`_concentration_checks`)
+`policy.evaluate()` runs on the proposed, whole-share orders. Projected portfolio
+exposures use post-trade AUM. These checks run for optimized, rules-based, and
+manual plans. They remain necessary because rounding and order construction can
+change the continuous optimizer result.
 
-| Check | Code | Rule |
+### Exposure and concentration
+
+| Check | Code | Current rule and outcome |
 |---|---|---|
-| Single issuer | `MANDATE-ISSUER` | Projected issuer weight vs fund single-issuer limit |
-| Sector | `MANDATE-SECTOR` | Projected sector weight vs sector soft limit |
-| Group | `MANDATE-GROUP` | Projected group weight vs group limit |
-| UCITS 5/40 | `UCITS-5-40` | Positions each above 5% must aggregate under 40% |
-| Country | `COUNTRY-LIMIT` | Home 100% / foreign 35% / emerging 20% |
+| Single issuer | `MANDATE-ISSUER` | Fund-specific limit; above limit `BLOCK`; within 90% of limit `WARN`. |
+| Sector | `MANDATE-SECTOR` | Fund-specific sector limit; above `BLOCK`; within 90% `WARN`. |
+| Group | `MANDATE-GROUP` | Fund-specific group limit; above `BLOCK`; within 90% `WARN`. |
+| Simplified 5/40 concentration | `UCITS-5-40` | Sum positions individually above 5%; limit 40%; above `BLOCK`, at least 36% `WARN`. This is not a full UCITS eligibility test. |
+| Country | `COUNTRY-LIMIT` | Home country 100%; foreign country 35%; emerging country 20% when an existing holding identifies that country as emerging. Above `BLOCK`; within 90% `WARN`. |
 
-**Status logic:** `> limit` → `BLOCK`; `>= 90% of limit` → `WARN`; otherwise
-`PASS`. A pre-existing breach worsened by no more than 0.01 pp → `WARN` rather
-than `BLOCK`, so an unrelated trade is not blocked by an inherited breach.
+For issuer, sector, group, and country checks, an inherited breach that is not
+worsened by more than 0.01 percentage points is reported as `WARN` rather than
+blocking an unrelated trade.
 
-### B.2 Per-order & plan checks (`_order_checks`)
+### Security eligibility and execution
 
-| Check | Code | Result |
+| Check | Code | Outcome |
 |---|---|---|
-| Restricted / pledged security | `RESTRICTED-SECURITY` | `BLOCK` |
-| Watchlist security | `WATCHLIST-SECURITY` | `ESCALATE` |
-| Sell exceeds available-after-pending | `RESTRICTED-SELL` | `BLOCK` |
-| Sale breaches minimum holding | `MIN-HOLDING` | `BLOCK` |
-| Lock-in (within sellable) | `LOCK-IN` | `PASS` (note only) |
-| ESG exclusion on new buy (e.g. ITC / tobacco) | `ESG-EXCLUSION` | `BLOCK` the buy |
-| Thermal-power generation > 20% on buy | `ESG-THERMAL-POWER` | `WARN` |
-| Stale price | `PRICE-FRESHNESS` | `BLOCK` |
-| Liquidity / ADV (daily participation over horizon) | `LIQUIDITY-ADV` | > 5%/day `WARN`; > 75%/day `ESCALATE`; missing ADV `ESCALATE` |
-| Bid-ask spread | `LIQUIDITY-SPREAD` | > 0.5% `WARN`; > 1% `BLOCK` |
-| Foreign-currency exposure | `FX-EXPOSURE` | > 10% `WARN`; > 15% `BLOCK` |
-| Corporate-action window | `CORP-ACTION-WINDOW` | within 1d dividend / 2d other → `WARN` |
-| Cash deployment | `CASH-DEPLOYMENT` | net buys must fit within 95% operational cash + 100% of the fresh subscription, else `BLOCK` |
-| Order count | `PLAN-ORDER-COUNT` | > 50 `WARN`; > 100 `ESCALATE` |
-| Execution horizon | `PLAN-HORIZON` | > 20 days `ESCALATE` |
+| Restricted or pledged/encumbered security | `RESTRICTED-SECURITY` | `BLOCK` any proposed trade. |
+| Internal watchlist | `WATCHLIST-SECURITY` | `ESCALATE` for review. |
+| Sell exceeds available shares after pending sells | `RESTRICTED-SELL` | `BLOCK`. |
+| Sale breaches minimum holding | `MIN-HOLDING` | `BLOCK`. |
+| Valid sell within lock-in restrictions | `LOCK-IN` | `PASS` informational check; only sellable quantity is used. |
+| Configured ESG exclusion on a buy | `ESG-EXCLUSION` | `BLOCK` the buy; existing shares are not automatically sold. |
+| Thermal-power exposure above 20% on a buy | `ESG-THERMAL-POWER` | `WARN`. |
+| Stale price | `PRICE-FRESHNESS` | `BLOCK`. |
+| ADV participation | `LIQUIDITY-ADV` | Average daily participation over the requested horizon: >5% `WARN`; >75% `ESCALATE`; missing ADV `ESCALATE`. It is not a hard optimizer cap. |
+| Bid-ask spread | `LIQUIDITY-SPREAD` | >0.5% `WARN`; >1% `BLOCK`. |
+| Foreign-currency exposure | `FX-EXPOSURE` | >10% `WARN`; >15% `BLOCK`. |
+| Corporate-action window | `CORP-ACTION-WINDOW` | Dividend/ex-date within 1 day or another event within 2 days: `WARN`. |
 
-Liquidity is treated as a **schedulable** constraint: a parent order too big for
-a single day is worked across the horizon (`ESCALATE` for review) rather than
-hard-blocked, so large flows stay executable.
+### Cash and plan-level review
 
-### B.3 Tax-awareness guardrails (`_tax_checks`) — `WARN` / `ESCALATE` only
-
-These never block; the human decides.
-
-| Check | Code | Result |
+| Check | Code | Outcome |
 |---|---|---|
-| Tax drag (bps of sell proceeds) | `TAX-DRAG` | > 60 bps `WARN`; > 150 bps `ESCALATE` |
-| STCG share of sell value | `TAX-STCG-SHARE` | > 50% `WARN` |
-| Loser kept because exit cost exceeds expected loss | `TAX-HOLD` | `WARN` |
+| Cash deployment | `CASH-DEPLOYMENT` | Net buys must fit within 95% of existing operational investable cash plus 100% of the new subscription; otherwise `BLOCK`. |
+| Number of orders | `PLAN-ORDER-COUNT` | More than 50 `WARN`; more than 100 `ESCALATE`. |
+| Execution horizon | `PLAN-HORIZON` | More than 20 days `ESCALATE`. |
 
-### B.4 Legacy compliance summary (`planner._compliance_checks`)
+### Tax guardrails
 
-A second, older concentration summary runs in
-[`planner.py`](../backend/app/planner.py): `SEBI-10PCT` (single issuer),
-`SECT-35PCT` (sector), `GRP-20PCT` (group). Status is `FAIL` / `WARN` / `PASS`,
-and a `FAIL` here also forces `execution_allowed = false`. Prefer the returned
-`policy_status` / `execution_allowed` fields for the clearest overall result.
+These are advisory and do not themselves block a plan.
 
----
+| Check | Code | Outcome |
+|---|---|---|
+| Exit tax drag | `TAX-DRAG` | >60 bps `WARN`; >150 bps `ESCALATE`. |
+| Short-term gains share of sale value | `TAX-STCG-SHARE` | >50% `WARN`. |
+| Losing position retained because exit cost exceeds expected loss | `TAX-HOLD` | `WARN`. |
 
-## How the checks decide the final plan result
+## 3. Legacy Compliance Summary
 
-Policy combines all check results in this order:
+`planner._compliance_checks()` separately reports:
 
-1. Any `BLOCK` → overall status `BLOCK`, `execution_allowed = false`.
-2. Else any `ESCALATE` → status `ESCALATE`, `execution_allowed = false`.
-3. Else any `WARN` → status `WARN`; execution allowed, but review advised.
-4. Else `PASS`; execution allowed.
+| Check | Code | Outcome |
+|---|---|---|
+| Single issuer | `SEBI-10PCT` | Above limit `FAIL`; at least 90% of limit `WARN`; otherwise `PASS`. |
+| Sector | `SECT-35PCT` | Above limit `FAIL`; at least 90% of limit `WARN`; otherwise `PASS`. |
+| Group | `GRP-20PCT` | Above limit `FAIL`; at least 90% of limit `WARN`; otherwise `PASS`. |
 
-A `FAIL` in the legacy planner summary also sets `execution_allowed = false`.
+Any legacy `FAIL` makes `execution_allowed` false, even if `policy_status` is
+only `WARN`. The active fund limits are database-backed when available. Current
+real-fund data labels each business group with its ticker, so affiliated
+companies will not aggregate until the group metadata is populated correctly.
 
----
+## 4. Final Plan Gate and UI
 
-## Why the optimizer and policy can disagree
+Backend `plan_gate_status` is an aggregate presentation status:
 
-- The optimizer **constructs** a proposed allocation; it is not the final
-  approval authority. For buys it can relax its sector cap after an infeasible
-  solve; post-order policy then checks the configured sector limit
-  independently.
-- Held securities are added to optimizer buy candidates **before** the exclusion
-  filter used for new universe names. A restricted / pledged / ESG-excluded
-  existing holding can therefore be proposed as a new buy; the post-order policy
-  check blocks it.
-- Optimized rebalance uses a generic 10% company limit, which can differ from
-  the fund-specific limit used by buy optimization and policy.
-- Active data labels each holding's business group with its own ticker, so the
-  configured group limit does not currently combine affiliated companies.
-- Expected returns are placeholder illustrative values in
-  [`forecast.py`](../backend/app/forecast.py), not live TFT predictions. The
-  optimizer's ranking is therefore a demo input; the rules above are real.
+| Condition | Plan gate | Execution |
+|---|---|---|
+| Legacy compliance `FAIL` or policy `BLOCK` | `BLOCKED` | Not allowed |
+| Otherwise, policy `ESCALATE` | `ESCALATE` | Not allowed; human review required |
+| Otherwise, a compliance warning, elevated risk, or policy `WARN` | `WARN` | Allowed, review advised |
+| No failure, escalation, or warning | `PASS` | Allowed |
 
-> The numeric thresholds in this document are current demo / POC settings from
-> code (overlaid from the database where present). They are **not** confirmed
-> legal or fund mandates.
+The Trade Planner UI shows the **Plan Gate** chip and the separate compliance
+and policy statuses in the summary tile. A `BLOCKED` plan lists each blocking
+policy check (rule code, entity, and message) directly under the recommendation
+alert. Duplicate legacy failures for an entity already represented by a policy
+block are omitted from that inline list. Full legacy checks remain in the
+Compliance table; policy warnings, blocks, and escalations appear in the
+Execution Risk panel.
 
----
+## 5. Important Boundaries
 
-## Code locations
+- The database thresholds and ESG exclusions are current demo/POC settings, not
+  approved legal or fund mandates.
+- `min_large_cap_pct` and the fund mandate's configured `max_cash_pct` are
+  exposed as configuration but are not currently enforced by the post-trade
+  policy. The separate 95% operational-cash deployment rule is enforced.
+- Missing or incomplete rule data may trigger escalation or fallback behavior;
+  it must not be interpreted as compliance approval.
+- Expected returns are supplied by `forecast.predict_returns`; they determine
+  optimizer ranking, not whether a policy limit is met.
+- The PIC decision endpoint records a review decision; it does not execute
+  trades. A plan with `execution_allowed = false` must not be treated as
+  executable because someone selected “Approve”.
 
-| Responsibility | File and function |
+## Code Locations
+
+| Responsibility | Source |
 |---|---|
-| Optimizer goals, constraints, retry behavior | `backend/app/optimizer.py`: `optimize_buy`, `optimize_sell`, `optimize_rebalance` |
-| Allocation method, fallback to rules, order forming, final plan | `backend/app/planner.py`: `_orders_by_optimizer`, `_orders_by_rules`, `generate_plan` |
-| Post-trade concentration, eligibility, execution, cash, tax, plan limits | `backend/app/policy.py`: `_concentration_checks`, `_order_checks`, `_tax_checks`, `evaluate` |
-| Active fund limits and holdings | `backend/app/data_v2.py`: `FUND_COMPLIANCE_LIMITS` |
-| Expected returns | `backend/app/forecast.py`: `predict_returns` (placeholder data) |
+| Convex allocation objectives and constraints | `backend/app/optimizer.py`: `optimize_buy`, `optimize_sell`, `optimize_rebalance` |
+| Candidate preparation, plan assembly, fallback, legacy checks, and plan gate | `backend/app/planner.py`: `_buy_candidates`, `_sell_candidates`, `_orders_by_optimizer`, `_compliance_checks`, `_plan_gate_status` |
+| Post-trade policy checks and risk flags | `backend/app/policy.py`: `_concentration_checks`, `_order_checks`, `_tax_checks`, `evaluate` |
+| Fund-specific mandate limits | `backend/app/data_v2.py`: `get_fund_compliance_limits` |
+| Plan-gate and blocker presentation | `frontend/src/components/TradePlanner.jsx`: Plan Gate summary, inline blocker list, Compliance table, and Execution Risk panel |

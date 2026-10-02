@@ -7,16 +7,36 @@ import {
   Typography,
 } from '@mui/material'
 import CheckCircleIcon from '@mui/icons-material/CheckCircle'
+import EmailOutlinedIcon from '@mui/icons-material/EmailOutlined'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
-import EditIcon from '@mui/icons-material/EditOutlined'
 import CloseIcon from '@mui/icons-material/CloseOutlined'
 import NorthEastIcon from '@mui/icons-material/NorthEast'
+import QueryStatsOutlinedIcon from '@mui/icons-material/QueryStatsOutlined'
+import AssignmentOutlinedIcon from '@mui/icons-material/AssignmentOutlined'
+import AccountBalanceWalletOutlinedIcon from '@mui/icons-material/AccountBalanceWalletOutlined'
+import SwapVertOutlinedIcon from '@mui/icons-material/SwapVertOutlined'
+import AccountBalanceOutlinedIcon from '@mui/icons-material/AccountBalanceOutlined'
+import GppGoodOutlinedIcon from '@mui/icons-material/GppGoodOutlined'
+import ReceiptLongOutlinedIcon from '@mui/icons-material/ReceiptLongOutlined'
+import ScheduleOutlinedIcon from '@mui/icons-material/ScheduleOutlined'
+import FactCheckOutlinedIcon from '@mui/icons-material/FactCheckOutlined'
+import ShowChartOutlinedIcon from '@mui/icons-material/ShowChartOutlined'
+import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutlined'
+import RemoveCircleOutlineIcon from '@mui/icons-material/RemoveCircleOutlined'
+import AutorenewIcon from '@mui/icons-material/Autorenew'
+import TrendingUpOutlinedIcon from '@mui/icons-material/TrendingUpOutlined'
+import TrendingDownOutlinedIcon from '@mui/icons-material/TrendingDownOutlined'
+import EditNoteOutlinedIcon from '@mui/icons-material/EditNoteOutlined'
+import RuleOutlinedIcon from '@mui/icons-material/RuleOutlined'
+import FunctionsOutlinedIcon from '@mui/icons-material/FunctionsOutlined'
+import PlayArrowOutlinedIcon from '@mui/icons-material/PlayArrowOutlined'
 import { api } from '../api'
 import { fmtCrValue, fmtNum, fmtPct, fmtRupee } from '../format'
 import { KpiGrid, Panel, ScrollX, Stat } from './ui'
 import PlanGenerationProgress from './PlanGenerationProgress'
 import RiskReturnPanel from './RiskReturnPanel'
 import RiskReturnComparison from './RiskReturnComparison'
+import PlannerAssistant from './PlannerAssistant'
 
 const toCr = (r) => r / 1e7
 const STEPS = ['PM Intent', 'Cash-Flow Planning', 'Trade Plan', 'Compliance & Risk', 'PIC Review']
@@ -49,13 +69,20 @@ const dateMonthOffset = (months) => {
 const daysBetween = (start, end) => Math.round(
   (Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86400000,
 )
+const assistantFieldSx = (active) => active ? ({
+  animation: 'assistant-field-change 700ms ease-out',
+  '@keyframes assistant-field-change': {
+    '0%': { boxShadow: '0 0 0 0 rgba(20, 126, 119, 0.45)' },
+    '100%': { boxShadow: '0 0 0 8px rgba(20, 126, 119, 0)' },
+  },
+}) : {}
 
 const ACTIONS = [
-  { key: 'contribution', label: 'Contribution', needsAmount: true, needsTarget: false, hint: 'Deploy an inflow across the book toward target weights.' },
-  { key: 'redemption', label: 'Redemption', needsAmount: true, needsTarget: false, hint: 'Raise cash to fund a payout by trimming over-weights.' },
-  { key: 'rebalance', label: 'Rebalance', needsAmount: false, needsTarget: false, hint: 'Bring every holding back to its target weight.' },
-  { key: 'increase', label: 'Increase Sector', needsAmount: true, needsTarget: true, hint: 'Add exposure to a sector.' },
-  { key: 'decrease', label: 'Reduce Sector', needsAmount: true, needsTarget: true, hint: 'Trim exposure to a sector.' },
+  { key: 'contribution', label: 'Contribution', icon: AddCircleOutlineIcon, needsAmount: true, needsTarget: false, hint: 'Deploy an inflow across the book toward target weights.' },
+  { key: 'redemption', label: 'Redemption', icon: RemoveCircleOutlineIcon, needsAmount: true, needsTarget: false, hint: 'Raise cash to fund a payout by trimming over-weights.' },
+  { key: 'rebalance', label: 'Rebalance', icon: AutorenewIcon, needsAmount: false, needsTarget: false, hint: 'Bring every holding back to its target weight.' },
+  { key: 'increase', label: 'Increase Sector', icon: TrendingUpOutlinedIcon, needsAmount: true, needsTarget: true, hint: 'Add exposure to a sector.' },
+  { key: 'decrease', label: 'Reduce Sector', icon: TrendingDownOutlinedIcon, needsAmount: true, needsTarget: true, hint: 'Trim exposure to a sector.' },
 ]
 
 // Sectors the engine can buy into (match backend BUY_ALLOCATION). "Reduce"
@@ -72,7 +99,7 @@ const PRESETS = [
   { label: 'Increase IT + Healthcare ₹80 Cr', action: 'increase', targets: ['Information Technology', 'Healthcare'], amount_cr: 80 },
 ]
 
-const sevOf = (s) => (s === 'FAIL' || s === 'BREACH' || s === 'HIGH' || s === 'BLOCK' ? 'error'
+const sevOf = (s) => (s === 'FAIL' || s === 'BREACH' || s === 'HIGH' || s === 'BLOCK' || s === 'BLOCKED' ? 'error'
   : s === 'WARN' || s === 'MEDIUM' || s === 'ESCALATE' ? 'warning' : 'success')
 
 const fmtRet = (r) => (r == null ? '—' : `${(r * 100).toFixed(2)}%`)
@@ -103,6 +130,17 @@ const riskToneSx = (severity) => (theme) => {
     ? { color: '#B9C6D2', bgcolor: 'rgba(125, 145, 165, 0.14)', borderColor: 'rgba(185, 198, 210, 0.28)' }
     : { color: '#526575', bgcolor: '#F0F4F7', borderColor: '#D7E0E8' })
 }
+const riskDecisionLabel = (flag) => ({
+  BLOCK: 'BLOCKED',
+  ESCALATE: 'ACTION',
+  WARN: 'REVIEW',
+}[flag.status] || (flag.severity === 'MEDIUM' ? 'REVIEW' : flag.severity))
+
+const riskDecisionTone = (flag) => (
+  flag.status === 'BLOCK' || flag.severity === 'HIGH' ? 'HIGH'
+    : flag.status === 'ESCALATE' ? 'MEDIUM'
+      : flag.status === 'WARN' || flag.severity === 'MEDIUM' ? 'REVIEW' : flag.severity
+)
 
 function RiskRegister({ flags }) {
   if (!flags.length) {
@@ -120,7 +158,9 @@ function RiskRegister({ flags }) {
     <Box sx={{ maxHeight: 360, overflowY: 'auto' }}>
       {groups.map(([category, items]) => {
         const highCount = items.filter((item) => item.severity === 'HIGH').length
-        const reviewCount = items.filter((item) => item.severity === 'MEDIUM').length
+        const actionCount = items.filter((item) => item.status === 'ESCALATE').length
+        const reviewCount = items.filter((item) => item.status === 'WARN'
+          || (!item.status && item.severity === 'MEDIUM')).length
         return (
           <Accordion key={category} disableGutters elevation={0} defaultExpanded={items.length <= 3}
             sx={{
@@ -155,7 +195,8 @@ function RiskRegister({ flags }) {
                     <Typography variant="body2" color="text.secondary" sx={{ flex: 1, minWidth: 0 }}>
                       {flag.message}
                     </Typography>
-                    <Chip size="small" label={flag.severity} variant="outlined" sx={riskToneSx(flag.severity)} />
+                    <Chip size="small" label={riskDecisionLabel(flag)} variant="outlined"
+                      sx={riskToneSx(riskDecisionTone(flag))} />
                   </Stack>
                 ))}
               </Stack>
@@ -303,7 +344,7 @@ function OrdersTable({ orders }) {
 function ForecastPanel({ forecast, orderTickers }) {
   if (!forecast) return null
   return (
-    <Panel title="Forecast — Predicted 1-M Returns"
+    <Panel icon={<QueryStatsOutlinedIcon />} title="Forecast — Predicted 1-M Returns"
       subtitle={`${forecast.model} · horizon ${forecast.horizon}${forecast.is_placeholder ? ' · placeholder (dummy returns until the TFT model is wired in)' : ''}`}>
       <ScrollX maxHeight={280}>
         <Table size="small" stickyHeader>
@@ -337,7 +378,7 @@ function ForecastPanel({ forecast, orderTickers }) {
   )
 }
 
-export default function TradePlanner({ fundId }) {
+export default function TradePlanner({ fundId, funds, onChangeFundId, onContinueToEmail }) {
   const [action, setAction] = useState('contribution')
   const [amount, setAmount] = useState(250)
   const [targets, setTargets] = useState(['Information Technology'])
@@ -356,6 +397,7 @@ export default function TradePlanner({ fundId }) {
   const [fundSectors, setFundSectors] = useState([])
   const [universe, setUniverse] = useState([])
   const [holdings, setHoldings] = useState([])
+  const [assistantHighlight, setAssistantHighlight] = useState('')
   const today = dateOffset(0)
   const latestTradeDate = dateMonthOffset(1)
   const securityOptions = [...universe, ...holdings.filter((h) => !universe.some((u) => u.ticker === h.ticker))]
@@ -405,6 +447,42 @@ export default function TradePlanner({ fundId }) {
     if (p.amount_cr != null) setAmount(p.amount_cr)
     if (p.targets) setTargets(p.targets)
     setPlan(null); setDecision(null)
+  }
+
+  async function applyAssistantUpdates(updates) {
+    const order = ['fund_id', 'action', 'method', 'amount_cr', 'manual_selections',
+      'manual_sector_selections', 'targets', 'trade_date', 'horizon_days', 'settlement_date',
+      'target_volatility']
+    setPlan(null)
+    setDecision(null)
+    setValidationWarning('')
+    for (const field of order) {
+      if (!(field in updates)) continue
+      setAssistantHighlight(field)
+      const value = updates[field]
+      if (field === 'fund_id') onChangeFundId?.(value)
+      if (field === 'action') setAction(value)
+      if (field === 'method') setMethod(value)
+      if (field === 'amount_cr') setAmount(value)
+      if (field === 'manual_selections') setManualSelections(value)
+      if (field === 'manual_sector_selections') setManualSectorSelections(value)
+      if (field === 'targets') setTargets(value)
+      if (field === 'trade_date') {
+        setTradeDate(value)
+        if (!('settlement_date' in updates) && !('horizon_days' in updates)) {
+          const currentHorizon = Math.min(MAX_SETTLEMENT_DAYS, Math.max(1, daysBetween(tradeDate, settlementDate)))
+          setSettlementDate(dateOffsetFrom(value, currentHorizon))
+        }
+      }
+      if (field === 'horizon_days') {
+        const startDate = updates.trade_date || tradeDate
+        setSettlementDate(dateOffsetFrom(startDate, value))
+      }
+      if (field === 'settlement_date') setSettlementDate(value)
+      if (field === 'target_volatility') setTargetVolatility(value)
+      await new Promise((resolve) => window.setTimeout(resolve, 230))
+    }
+    window.setTimeout(() => setAssistantHighlight(''), 900)
   }
 
   async function generate() {
@@ -459,36 +537,94 @@ export default function TradePlanner({ fundId }) {
   }
 
   const s = plan?.summary
+  const planGateStatus = s?.plan_gate_status
+    ?? (!plan?.execution_allowed
+      ? (plan?.policy_status === 'ESCALATE' ? 'ESCALATE' : 'BLOCKED')
+      : s?.compliance_status)
+  const policyBlocks = (plan?.policy_checks || []).filter((check) => check.status === 'BLOCK')
+  const blockedEntities = new Set(policyBlocks.map((check) => check.entity))
+  const blockReasons = [
+    ...policyBlocks.map((check) => ({
+      key: `policy-${check.code}-${check.entity}`,
+      label: `${check.code}${check.entity ? ` · ${check.entity}` : ''}`,
+      message: check.message,
+    })),
+    ...(plan?.compliance_checks || [])
+      .filter((check) => check.status === 'FAIL' && !blockedEntities.has(check.entity))
+      .map((check) => ({
+        key: `compliance-${check.code}-${check.entity}`,
+        label: `${check.rule}${check.entity ? ` · ${check.entity}` : ''}`,
+        message: check.message,
+      })),
+  ]
   const activePhaseIndex = progressEvents.length ? progressEvents[progressEvents.length - 1].index : 0
   const activeStep = plan ? 4 : busy ? Math.min(4, activePhaseIndex) : 0
   const orderTickers = new Set((plan?.orders || []).map((o) => o.ticker))
   const opt = plan?.optimization
 
+  const selectedFund = funds.find((fund) => fund.fund_id === fundId)
+  const assistantDraft = {
+    action,
+    amount_cr: Number(amount),
+    targets,
+    method,
+    fund_id: fundId,
+    fund_name: selectedFund?.name || fundId,
+    horizon_days: daysBetween(tradeDate, settlementDate),
+    trade_date: tradeDate,
+    settlement_date: settlementDate,
+    target_volatility: targetVolatility,
+    manual_selections: manualSelections,
+    manual_sector_selections: manualSectorSelections,
+  }
+
   return (
-    <Stack spacing={2.5}>
+    <Box sx={{ display: 'grid', gap: 2.5, alignItems: 'start', minWidth: 0,
+      gridTemplateColumns: { xs: 'minmax(0, 1fr)', lg: 'minmax(0, 1fr) minmax(320px, 360px)' },
+      gridTemplateAreas: { xs: '"assistant" "planner"', lg: '"planner assistant"' } }}>
+      <PlannerAssistant fundId={fundId} funds={funds} draft={assistantDraft}
+        sectors={[...new Set([...BUYABLE_SECTORS, ...fundSectors])]} securities={securityOptions.map((item) => item.ticker)}
+        plan={plan} onApplyUpdates={applyAssistantUpdates} onGeneratePlan={generate} busy={busy} />
+      <Stack spacing={2.5} sx={{ gridArea: 'planner', minWidth: 0 }}>
       <Stepper activeStep={activeStep} alternativeLabel sx={{ display: { xs: 'none', md: 'flex' } }}>
         {STEPS.map((label) => <Step key={label}><StepLabel>{label}</StepLabel></Step>)}
       </Stepper>
 
       {/* Intent — the input, given a highlighted card at the top */}
-      <Panel highlight title="Portfolio Manager Intent" sx={{
+      <Panel highlight icon={<AssignmentOutlinedIcon />} title="Portfolio Manager Intent" sx={{
         pointerEvents: busy ? 'none' : 'auto',
         opacity: busy ? 0.55 : 1,
         transition: 'opacity 180ms ease',
       }}>
         <ToggleButtonGroup exclusive value={action} color="primary" size="small"
           onChange={(_, v) => v && (setAction(v), setPlan(null), setDecision(null))}
-          sx={{ flexWrap: 'wrap', mb: 2 }}>
-          {ACTIONS.map((a) => <ToggleButton key={a.key} value={a.key}>{a.label}</ToggleButton>)}
+          sx={{ flexWrap: 'wrap', mb: 2, ...assistantFieldSx(assistantHighlight === 'action') }}>
+          {ACTIONS.map((a) => {
+            const Icon = a.icon
+            return (
+              <ToggleButton key={a.key} value={a.key} sx={{ gap: 0.75 }}>
+                <Icon fontSize="small" />{a.label}
+              </ToggleButton>
+            )
+          })}
         </ToggleButtonGroup>
 
-        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} alignItems={{ sm: 'center' }} sx={{ mb: 2 }}>
+        <Stack spacing={1} sx={{ mb: 2, minWidth: 0 }}>
           <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>Allocation method</Typography>
           <ToggleButtonGroup exclusive value={method} color="secondary" size="small"
-            onChange={(_, v) => v && (setMethod(v), setPlan(null), setDecision(null))}>
-            <ToggleButton value="manual">Manual</ToggleButton>
-            <ToggleButton value="rules">Rules-Based</ToggleButton>
-            <ToggleButton value="optimize">Convex Optimization</ToggleButton>
+            onChange={(_, v) => v && (setMethod(v), setPlan(null), setDecision(null))}
+            sx={{ width: '100%', flexWrap: 'wrap',
+              '& .MuiToggleButton-root': { flex: '1 1 140px', minWidth: 0, whiteSpace: 'normal' },
+              ...assistantFieldSx(assistantHighlight === 'method') }}>
+            <ToggleButton value="manual" sx={{ gap: 0.75 }}>
+              <EditNoteOutlinedIcon fontSize="small" />Manual
+            </ToggleButton>
+            <ToggleButton value="rules" sx={{ gap: 0.75 }}>
+              <RuleOutlinedIcon fontSize="small" />Rules-Based
+            </ToggleButton>
+            <ToggleButton value="optimize" sx={{ gap: 0.75 }}>
+              <FunctionsOutlinedIcon fontSize="small" />Convex Optimization
+            </ToggleButton>
           </ToggleButtonGroup>
           <Typography variant="caption" color="text.secondary">
             {method === 'manual'
@@ -499,7 +635,7 @@ export default function TradePlanner({ fundId }) {
           </Typography>
         </Stack>
 
-        <Box sx={{ mb: 2 }}>
+        <Box sx={{ mb: 2, ...assistantFieldSx(assistantHighlight === 'target_volatility') }}>
           <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600, mb: 0.5 }}>
             Risk / return target
           </Typography>
@@ -511,10 +647,11 @@ export default function TradePlanner({ fundId }) {
             }} afterPlan={plan?.risk_return} />
         </Box>
 
-        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}
-          alignItems={{ sm: 'flex-start' }} flexWrap="wrap">
+        <Box sx={{ display: 'grid', minWidth: 0, gap: 1.5, alignItems: 'start',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 220px), 1fr))',
+          '& > *': { width: '100%', minWidth: 0 } }}>
           {method === 'manual' && !manualUsesSectors ? (
-            <Stack spacing={1} sx={{ width: { xs: '100%', sm: 420 }, flexShrink: 0 }}>
+            <Stack spacing={1} sx={{ gridColumn: '1 / -1' }}>
               <FormControl size="small" sx={{ width: '100%' }}>
                 <InputLabel id="manual-securities-label">Securities</InputLabel>
                 <Select labelId="manual-securities-label" label="Securities" multiple
@@ -527,7 +664,8 @@ export default function TradePlanner({ fundId }) {
                     amount_cr: manualSelections.find((s) => s.ticker === ticker)?.amount_cr || 0,
                   })))
                 }}
-                sx={{ width: '100%', '& .MuiSelect-select': { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }}
+                sx={{ width: '100%', ...assistantFieldSx(assistantHighlight === 'manual_selections'),
+                  '& .MuiSelect-select': { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }}
                 renderValue={(selected) => selected.join(', ')}
                 MenuProps={{ disableAutoFocusItem: true }}>
                 {securityOptions.map((security) => (
@@ -566,8 +704,9 @@ export default function TradePlanner({ fundId }) {
               ))}
             </Stack>
           ) : cfg.needsTarget && (
-            <Stack spacing={1.25} sx={{ width: { xs: '100%', sm: 520 }, maxWidth: '100%', minWidth: 0, flexShrink: 0 }}>
-              <FormControl size="small" sx={{ width: '100%', minWidth: 0 }}>
+            <Stack spacing={1.25} sx={{ gridColumn: '1 / -1' }}>
+              <FormControl size="small" sx={{ width: '100%', minWidth: 0,
+                ...assistantFieldSx(assistantHighlight === 'targets' || assistantHighlight === 'manual_sector_selections') }}>
                 <InputLabel id="sector-targets-label">Sectors</InputLabel>
                 <Select labelId="sector-targets-label" label="Sectors" multiple
                   value={targets.filter((t) => sectorOptions.includes(t))}
@@ -579,7 +718,7 @@ export default function TradePlanner({ fundId }) {
                       amount_cr: manualSectorSelections.find((item) => item.sector === sector)?.amount_cr || 0,
                     })))
                   }}
-                  sx={{ width: '100%', minWidth: 0,
+                  sx={{ width: '100%', minWidth: 0, ...assistantFieldSx(assistantHighlight === 'targets'),
                     '& .MuiSelect-select': { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }}
                   renderValue={(selected) => selected.join(', ')}
                   MenuProps={{ disableAutoFocusItem: true }}>
@@ -626,13 +765,13 @@ export default function TradePlanner({ fundId }) {
                 setValidationWarning('')
                 setAmount(e.target.value)
               }}
-              sx={{ width: { xs: '100%', sm: 150 }, flexShrink: 0 }} />
+                  sx={{ ...assistantFieldSx(assistantHighlight === 'amount_cr') }} />
           )}
           <TextField label="Trade date" type="date" size="small" value={tradeDate}
             slotProps={{ htmlInput: { min: today, max: latestTradeDate } }}
             onChange={(e) => { setTradeDate(e.target.value); setPlan(null); setDecision(null) }}
             InputLabelProps={{ shrink: true }}
-            sx={{ width: { xs: '100%', sm: 170 }, flexShrink: 0 }} />
+            sx={{ ...assistantFieldSx(assistantHighlight === 'trade_date') }} />
           <TextField label="Settlement date" type="date" size="small" value={settlementDate}
             slotProps={{ htmlInput: {
               min: tradeDate,
@@ -640,13 +779,14 @@ export default function TradePlanner({ fundId }) {
             } }}
             onChange={(e) => { setSettlementDate(e.target.value); setPlan(null); setDecision(null) }}
             InputLabelProps={{ shrink: true }}
-            sx={{ width: { xs: '100%', sm: 190 }, flexShrink: 0 }} />
+            sx={{
+              ...assistantFieldSx(assistantHighlight === 'settlement_date' || assistantHighlight === 'horizon_days') }} />
           <Button variant="contained" size="large" onClick={generate} disabled={busy}
-            sx={{ width: 170, minWidth: 170, height: 40, flexShrink: 0 }}
-            startIcon={busy ? <CircularProgress size={16} color="inherit" /> : null}>
+            sx={{ minWidth: 0, height: 40 }}
+            startIcon={busy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowOutlinedIcon />}>
             {busy ? 'Generating…' : 'Generate Plan'}
           </Button>
-        </Stack>
+        </Box>
         <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>{cfg.hint}</Typography>
 
         <Stack direction="row" spacing={1} sx={{ mt: 2, flexWrap: 'wrap', gap: 1 }}>
@@ -681,17 +821,17 @@ export default function TradePlanner({ fundId }) {
             </Stack>
             {/* Summary tiles — investable cash leads with an accent */}
             <KpiGrid min={190}>
-              <Stat accent label="Investable Cash" value={fmtCrValue(toCr(s.investable_amount), 0)}
+              <Stat accent icon={<AccountBalanceWalletOutlinedIcon />} label="Investable Cash" value={fmtCrValue(toCr(s.investable_amount), 0)}
                 sub={`${plan.intent.trade_date} to ${plan.intent.settlement_date}`} color="secondary.main" />
-              <Stat label="Buy / Sell" value={`${fmtCrValue(toCr(s.total_buy_value), 0)}`}
+              <Stat icon={<SwapVertOutlinedIcon />} label="Buy / Sell" value={`${fmtCrValue(toCr(s.total_buy_value), 0)}`}
                 sub={`sell ${fmtCrValue(toCr(s.total_sell_value), 0)} · ${s.order_count} orders`} />
-              <Stat label="Net Cash Impact" value={fmtCrValue(toCr(s.net_cash_impact), 0)}
+              <Stat icon={<AccountBalanceOutlinedIcon />} label="Net Cash Impact" value={fmtCrValue(toCr(s.net_cash_impact), 0)}
                 sub={`${s.net_cash_impact < 0 ? 'cash deployed' : 'cash raised'} · ${fmtCrValue(toCr(s.net_cash_after_tax), 0)} after tax`}
                 color={s.net_cash_impact < 0 ? 'error.main' : 'success.main'} />
-              <Stat label="Compliance" value={<Chip label={s.compliance_status} color={sevOf(s.compliance_status)} size="small" />}
-                sub={decision ? decision.status : plan.status} />
+              <Stat icon={<GppGoodOutlinedIcon />} label="Plan Gate" value={<Chip label={planGateStatus} color={sevOf(planGateStatus)} size="small" />}
+                sub={`Compliance ${s.compliance_status} · policy ${plan.policy_status}`} />
               {s.total_sell_value > 0 && (
-                <Stat label="Est. Exit Tax" value={fmtCrValue(toCr(s.est_total_tax), 2)}
+                <Stat icon={<ReceiptLongOutlinedIcon />} label="Est. Exit Tax" value={fmtCrValue(toCr(s.est_total_tax), 2)}
                   sub={`${s.tax_drag_bps} bps drag · ${s.stcg_share_pct}% STCG`}
                   color={s.est_total_tax < 0 ? 'success.main' : s.tax_drag_bps > 60 ? 'error.main' : 'text.primary'} />
               )}
@@ -707,7 +847,20 @@ export default function TradePlanner({ fundId }) {
               )}
             </Stack>
 
-            <Alert severity={sevOf(s.compliance_status)} variant="outlined">{plan.recommendation}</Alert>
+            <Alert severity={sevOf(planGateStatus)} variant="outlined">
+              <Typography variant="body2">{plan.recommendation}</Typography>
+              {planGateStatus === 'BLOCKED' && blockReasons.length > 0 && (
+                <Box component="ul" sx={{ mt: 1, mb: 0, pl: 2.5 }}>
+                  {blockReasons.map((reason) => (
+                    <li key={reason.key}>
+                      <Typography variant="body2">
+                        <strong>{reason.label}:</strong> {reason.message}
+                      </Typography>
+                    </li>
+                  ))}
+                </Box>
+              )}
+            </Alert>
             {opt && (
               <Alert severity="info" variant="outlined">
                 <strong>Optimizer:</strong> {opt.objective} · solver {opt.solver} ({opt.status})
@@ -748,7 +901,7 @@ export default function TradePlanner({ fundId }) {
             <AdditionalPlanNotes warnings={plan.warnings || []} riskFlags={plan.risk_flags || []} />
 
             {plan.risk_return && (
-              <Panel title="Risk & Return: Before vs After Plan">
+              <Panel icon={<ShowChartOutlinedIcon />} title="Risk & Return: Before vs After Plan">
                 <RiskReturnComparison metrics={plan.risk_return} />
               </Panel>
             )}
@@ -757,7 +910,7 @@ export default function TradePlanner({ fundId }) {
                 cash-flow + pending context ride a side rail. */}
             <Box sx={{ display: 'grid', gap: 2.5, alignItems: 'start',
               gridTemplateColumns: { xs: '1fr', lg: '1.6fr 1fr' } }}>
-              <Panel highlight title={`Generated Orders (${plan.orders.length})`}>
+              <Panel highlight icon={<ReceiptLongOutlinedIcon />} title={`Generated Orders (${plan.orders.length})`}>
                 {plan.funding_sources.length > 0 && (
                   <Stack direction="row" spacing={1} sx={{ mb: 1.5, flexWrap: 'wrap', gap: 1 }}>
                     {plan.funding_sources.map((f, i) => (
@@ -772,7 +925,7 @@ export default function TradePlanner({ fundId }) {
               <Stack spacing={2.5}>
                 <ForecastPanel forecast={plan.forecast} orderTickers={orderTickers} />
 
-                <Panel title={`Cash-Flow Planning → ${fmtCrValue(toCr(plan.cash_flow_planning.investable_amount))}`}>
+                <Panel icon={<AccountBalanceWalletOutlinedIcon />} title={`Cash-Flow Planning → ${fmtCrValue(toCr(plan.cash_flow_planning.investable_amount))}`}>
                   <Table size="small">
                     <TableBody>
                       {plan.cash_flow_planning.line_items.map((li, i) => (
@@ -804,7 +957,7 @@ export default function TradePlanner({ fundId }) {
                   )}
                 </Panel>
 
-                <Panel title={`Pending / Unsettled (${plan.pending_trades.length})`}
+                <Panel icon={<ScheduleOutlinedIcon />} title={`Pending / Unsettled (${plan.pending_trades.length})`}
                   subtitle={`Committed but unsettled (T+1 / T+2) — already reflected above. Net ${fmtCrValue(plan.pending_net_cr)}.`}>
                   {plan.pending_trades.length === 0 ? (
                     <Typography color="text.secondary" variant="body2">No pending trades.</Typography>
@@ -837,7 +990,7 @@ export default function TradePlanner({ fundId }) {
             </Box>
 
             {/* Compliance, Tax & Risk — three-up on wide screens */}
-            <Panel title="Compliance, Tax & Risk">
+            <Panel icon={<GppGoodOutlinedIcon />} title="Compliance, Tax & Risk">
               <Box sx={{ display: 'grid', gap: 3, gridTemplateColumns: { xs: '1fr', md: '1fr 1fr', xl: '1.1fr 1fr 1fr' } }}>
                 <Box>
                   <Typography variant="subtitle2" gutterBottom>Compliance</Typography>
@@ -876,7 +1029,7 @@ export default function TradePlanner({ fundId }) {
             </Panel>
 
             {/* PIC review — highlighted human-decision gate */}
-            <Panel highlight title="PIC Review"
+            <Panel highlight icon={<FactCheckOutlinedIcon />} title="PIC Review"
               action={(
                 <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: 'wrap' }}>
                   <Chip size="small" label={plan.plan_id} variant="outlined" />
@@ -886,13 +1039,22 @@ export default function TradePlanner({ fundId }) {
               {!decision ? (
                 <Stack direction="row" spacing={1.5} sx={{ flexWrap: 'wrap', gap: 1.5 }}>
                   <Button variant="contained" color="success" startIcon={<CheckCircleIcon />} onClick={() => decide('Approve')}>Approve</Button>
-                  <Button variant="outlined" color="secondary" startIcon={<EditIcon />} onClick={() => decide('Modify')}>Modify</Button>
                   <Button variant="outlined" color="error" startIcon={<CloseIcon />} onClick={() => decide('Reject')}>Reject</Button>
                   <Button variant="outlined" color="warning" startIcon={<NorthEastIcon />} onClick={() => decide('Escalate')}>Escalate</Button>
                 </Stack>
               ) : (
-                <Alert severity="info">Decision recorded: <strong>{decision.decision}</strong> → {decision.status}
-                  <Typography variant="caption" display="block">by {decision.reviewer} · {new Date(decision.decided_at).toLocaleString()}</Typography>
+                <Alert severity="info">
+                  <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ sm: 'center' }}
+                    justifyContent="space-between" spacing={1.5} sx={{ width: '100%' }}>
+                    <Box>
+                      <Typography variant="body2">Decision recorded: <strong>{decision.decision}</strong> → {decision.status}</Typography>
+                      <Typography variant="caption" display="block">by {decision.reviewer} · {new Date(decision.decided_at).toLocaleString()}</Typography>
+                    </Box>
+                    <Button variant="contained" startIcon={<EmailOutlinedIcon />}
+                      onClick={() => onContinueToEmail?.(plan.plan_id)}>
+                      Continue to email
+                    </Button>
+                  </Stack>
                 </Alert>
               )}
               <Divider sx={{ my: 1.5 }} />
@@ -904,6 +1066,7 @@ export default function TradePlanner({ fundId }) {
           </Stack>
         </Grow>
       )}
-    </Stack>
+      </Stack>
+    </Box>
   )
 }

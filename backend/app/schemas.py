@@ -91,7 +91,7 @@ class IntentRequest(BaseModel):
 class DecisionRequest(BaseModel):
     """A PIC associate's decision on a generated plan."""
 
-    decision: Literal["Approve", "Modify", "Reject", "Escalate"]
+    decision: Literal["Approve", "Reject", "Escalate"]
     reviewer: Optional[str] = None
     comment: Optional[str] = None
 
@@ -110,6 +110,28 @@ class EmailDraftResponse(BaseModel):
     subject: str
     body: str
     model: str
+
+
+class AssistantInterpretRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=4000)
+    draft: dict[str, Any] = Field(default_factory=dict)
+
+
+class AssistantChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(..., min_length=1, max_length=3000)
+
+
+class AssistantChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=3000)
+    history: list[AssistantChatMessage] = Field(default_factory=list, max_length=10)
+
+
+class AssistantChatResponse(BaseModel):
+    plan_id: str
+    reply: str
+    model: str
+    tools_used: list[str]
 
 
 class SendEmailRequest(BaseModel):
