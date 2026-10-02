@@ -388,6 +388,28 @@ def list_sent_emails(plan_id: str) -> list[dict[str, str]] | None:
     return [dict(row) for row in rows]
 
 
+def list_sent_email_summaries() -> dict[str, dict[str, Any]] | None:
+    """Return sent-email counts and latest sent timestamps by plan."""
+    if not available():
+        return None
+    try:
+        with connect() as conn:
+            _ensure_sent_emails_table(conn)
+            rows = conn.execute(
+                "SELECT plan_id, COUNT(*) AS sent_email_count, MAX(sent_at) AS last_sent_email_at "
+                "FROM sent_emails GROUP BY plan_id"
+            ).fetchall()
+    except sqlite3.Error:
+        return None
+    return {
+        row["plan_id"]: {
+            "sent_email_count": row["sent_email_count"],
+            "last_sent_email_at": row["last_sent_email_at"],
+        }
+        for row in rows
+    }
+
+
 def save_decision(plan_id: str, status: str, decision: dict) -> bool:
     """Record a PIC decision: append to ``plan_decisions`` and update the plan's
     status + embedded decision in ``plan_json``. Returns ``False`` if unavailable

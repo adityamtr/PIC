@@ -91,7 +91,7 @@ class IntentRequest(BaseModel):
 class DecisionRequest(BaseModel):
     """A PIC associate's decision on a generated plan."""
 
-    decision: Literal["Approve", "Modify", "Reject", "Escalate"]
+    decision: Literal["Approve", "Reject", "Escalate"]
     reviewer: Optional[str] = None
     comment: Optional[str] = None
 

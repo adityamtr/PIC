@@ -18,6 +18,7 @@ import PlanHistory from './components/PlanHistory'
 export default function App() {
   const [mode, setMode] = useState(() => localStorage.getItem('pic-mode') || 'light')
   const [tab, setTab] = useState(0)
+  const [focusedPlanId, setFocusedPlanId] = useState('')
   const [apiUp, setApiUp] = useState(null)
   const [funds, setFunds] = useState([])
   const [fundId, setFundId] = useState('')
@@ -36,6 +37,11 @@ export default function App() {
   }, [])
 
   const toggleMode = () => setMode((m) => (m === 'light' ? 'dark' : 'light'))
+
+  function continueToEmail(planId) {
+    setFocusedPlanId(planId)
+    setTab(3)
+  }
 
   async function handleResetDb() {
     if (!window.confirm('Reset the database to its freshly-seeded state? '
@@ -65,7 +71,10 @@ export default function App() {
             sx={{ display: { xs: 'none', sm: 'inline-flex' } }} />
           <Box sx={{ flexGrow: 1 }} />
           {funds.length > 0 && (
-            <Select size="small" value={fundId} onChange={(e) => setFundId(e.target.value)}
+            <Select size="small" value={fundId} onChange={(e) => {
+              setFundId(e.target.value)
+              setFocusedPlanId('')
+            }}
               sx={{ minWidth: 220, fontWeight: 600 }}>
               {funds.map((f) => (
                 <MenuItem key={f.fund_id} value={f.fund_id}>
@@ -111,14 +120,14 @@ export default function App() {
                 back. The other tabs keep remounting per visit, since they rely
                 on that to refetch fresh data. */}
             <Box sx={{ display: tab === 0 ? 'block' : 'none' }}>
-              <TradePlanner fundId={fundId} />
+              <TradePlanner fundId={fundId} onContinueToEmail={continueToEmail} />
             </Box>
             {tab !== 0 && (
               <Fade in key={`${tab}-${fundId}`} timeout={350}>
                 <Box>
                   {tab === 1 && <Portfolio fundId={fundId} />}
                   {tab === 2 && <Trades fundId={fundId} />}
-                  {tab === 3 && <PlanHistory fundId={fundId} />}
+                  {tab === 3 && <PlanHistory fundId={fundId} focusPlanId={focusedPlanId} />}
                 </Box>
               </Fade>
             )}

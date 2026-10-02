@@ -3,7 +3,7 @@ import {
   Accordion, AccordionDetails, AccordionSummary, Alert, Box, Button, Chip,
   CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, Divider,
   IconButton, MenuItem, Stack, Table, TableBody, TableCell, TableHead, TableRow,
-  Snackbar, TextField, ToggleButton, ToggleButtonGroup, Typography,
+  Snackbar, TextField, ToggleButton, ToggleButtonGroup, Tooltip, Typography,
 } from '@mui/material'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import EmailOutlinedIcon from '@mui/icons-material/EmailOutlined'
@@ -11,6 +11,7 @@ import HistoryIcon from '@mui/icons-material/History'
 import SendOutlinedIcon from '@mui/icons-material/SendOutlined'
 import CheckCircleIcon from '@mui/icons-material/CheckCircle'
 import CloseIcon from '@mui/icons-material/CloseOutlined'
+import NorthEastIcon from '@mui/icons-material/NorthEast'
 import ReactMarkdown from 'react-markdown'
 import { api } from '../api'
 import { fmtCrValue, fmtNum, fmtRupee } from '../format'
@@ -104,14 +105,16 @@ function PlanOrders({ orders = [] }) {
   )
 }
 
-function PlanRecord({ plan, onDecide, deciding, onGenerateEmail, onViewEmails, generatingEmail }) {
+function PlanRecord({ plan, onDecide, deciding, onGenerateEmail, onViewEmails, generatingEmail,
+  expanded, onExpandedChange }) {
   const status = decisionStatus(plan)
   const intent = plan.intent || {}
   const summary = plan.summary || {}
   const target = Array.isArray(intent.targets) ? intent.targets.join(', ') : intent.target
   const method = plan.allocation_method || intent.method || '—'
   const pendingReview = status.label === 'Pending review'
-  const approved = status.label === 'Approved'
+  const decisionComplete = ['Approved', 'Rejected', 'Escalated'].includes(status.label)
+  const sentEmailCount = plan.sent_email_count || 0
   const riskFlags = plan.risk_flags || []
   const riskFindings = summarizeRiskFlags(riskFlags)
   const riskGroups = riskFindings.reduce((groups, finding) => {
@@ -122,7 +125,9 @@ function PlanRecord({ plan, onDecide, deciding, onGenerateEmail, onViewEmails, g
   const reviewRiskCount = riskFindings.filter((finding) => finding.severity === 'MEDIUM').length
 
   return (
-    <Accordion disableGutters elevation={0} sx={{
+    <Accordion id={`plan-record-${plan.plan_id}`} expanded={expanded}
+      onChange={(_, isExpanded) => onExpandedChange(isExpanded ? plan.plan_id : '')}
+      disableGutters elevation={0} sx={{
       border: 1, borderColor: 'divider', borderRadius: '4px !important',
       '&:before': { display: 'none' },
     }}>
@@ -140,6 +145,12 @@ function PlanRecord({ plan, onDecide, deciding, onGenerateEmail, onViewEmails, g
           </Box>
           <Stack direction="row" spacing={0.75} sx={{ flexWrap: 'wrap', gap: 0.75 }}>
             <Chip size="small" color={status.color} label={status.label} />
+            {sentEmailCount > 0 && (
+              <Tooltip title={`Last sent ${formatDate(plan.last_sent_email_at)}`}>
+                <Chip size="small" color="success" variant="outlined" icon={<EmailOutlinedIcon />}
+                  label={sentEmailCount === 1 ? 'Email sent' : `${sentEmailCount} emails sent`} />
+              </Tooltip>
+            )}
           </Stack>
         </Box>
       </AccordionSummary>
@@ -244,13 +255,17 @@ function PlanRecord({ plan, onDecide, deciding, onGenerateEmail, onViewEmails, g
                 disabled={!pendingReview || deciding} onClick={() => onDecide(plan, 'Reject')}>
                 Reject
               </Button>
+              <Button size="small" variant="outlined" color="warning" startIcon={<NorthEastIcon />}
+                disabled={!pendingReview || deciding} onClick={() => onDecide(plan, 'Escalate')}>
+                Escalate
+              </Button>
               <Button size="small" variant="contained" color="primary"
                 startIcon={generatingEmail ? <CircularProgress size={14} color="inherit" /> : <EmailOutlinedIcon />}
-                disabled={!approved || generatingEmail} onClick={() => onGenerateEmail(plan)}>
+                disabled={!decisionComplete || generatingEmail} onClick={() => onGenerateEmail(plan)}>
                 {generatingEmail ? 'Drafting…' : 'Draft Email'}
               </Button>
               <Button size="small" variant="outlined" startIcon={<HistoryIcon />}
-                disabled={!approved} onClick={() => onViewEmails(plan)}>
+                disabled={!decisionComplete} onClick={() => onViewEmails(plan)}>
                 Email History
               </Button>
             </Stack>
@@ -261,12 +276,13 @@ function PlanRecord({ plan, onDecide, deciding, onGenerateEmail, onViewEmails, g
   )
 }
 
-export default function PlanHistory({ fundId }) {
+export default function PlanHistory({ fundId, focusPlanId = '' }) {
   const [plans, setPlans] = useState([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [actionError, setActionError] = useState('')
   const [deciding, setDeciding] = useState('')
+  const [expandedPlanId, setExpandedPlanId] = useState(focusPlanId)
   const [generatingEmail, setGeneratingEmail] = useState('')
   const [emailDraft, setEmailDraft] = useState(null)
   const [sentEmails, setSentEmails] = useState([])
@@ -288,6 +304,16 @@ export default function PlanHistory({ fundId }) {
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
   }, [fundId])
+
+  useEffect(() => {
+    setExpandedPlanId(focusPlanId)
+    if (focusPlanId && !loading) {
+      document.getElementById(`plan-record-${focusPlanId}`)?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+      })
+    }
+  }, [focusPlanId, loading, plans])
 
   async function decide(plan, choice) {
     setDeciding(plan.plan_id)
@@ -355,6 +381,13 @@ export default function PlanHistory({ fundId }) {
         model: emailDraft.model,
       })
       setSentEmails((current) => [sent, ...current.filter((email) => email.email_id !== sent.email_id)])
+      setPlans((current) => current.map((plan) => plan.plan_id === emailPlanId
+        ? {
+          ...plan,
+          sent_email_count: (plan.sent_email_count || 0) + 1,
+          last_sent_email_at: sent.sent_at,
+        }
+        : plan))
       setEmailDraft(null)
       setDraftOpen(false)
       setSentNotice('Sent to this plan’s email history. External delivery is not configured.')
@@ -391,7 +424,8 @@ export default function PlanHistory({ fundId }) {
               <PlanRecord key={plan.plan_id} plan={plan} onDecide={decide}
                 deciding={deciding === plan.plan_id} onGenerateEmail={generateEmail}
                 onViewEmails={viewEmailHistory}
-                generatingEmail={generatingEmail === plan.plan_id} />
+                generatingEmail={generatingEmail === plan.plan_id}
+                expanded={expandedPlanId === plan.plan_id} onExpandedChange={setExpandedPlanId} />
             ))}
           </Stack>
         )}

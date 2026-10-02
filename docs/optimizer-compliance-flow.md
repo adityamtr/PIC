@@ -124,27 +124,29 @@ After optimization, planner code ignores rebalance changes below ₹0.25 Cr and 
 
 The optimizer enforces the hard allocation constraints above. These policy checks still run **after** orders are built, including for rule-based or manual plans, and to catch differences from whole-share rounding or order construction. Warning and escalation bands, including ADV participation, are not optimization constraints: they may still flag a plan for review after the solve.
 
-For company, sector, group, and country limits:
+For issuer, sector, group, and foreign-country limits:
 
 - **BLOCK:** projected exposure is above the limit.
 - **WARN:** projected exposure reaches at least 90% of the limit, but is not blocked.
 - **PASS:** projected exposure is below 90% of the limit.
 - **Existing breach:** if the fund is already above a limit, a proposal that worsens it by no more than 0.01 percentage points is a warning; a larger worsening is blocked.
 
+Home-country exposure is a hard cap only: the home-country limit is 100%, with no 90% warning band because near-100% domestic exposure is expected.
+
 | Post-trade check | Rule in everyday terms | Result |
 |---|---|---|
 | Company / sector / group limits | Check the projected weight against the active fund's configured limit above. | Above limit: `BLOCK`; at 90% or more: `WARN`. |
 | Group exposure | Add together holdings with the same business-group label. | Uses configured group caps, but active data currently labels each holding with its own ticker, so related companies are not actually combined. |
 | 5/40 diversification check | Add the weights of all individual holdings that are each above 5%; compare the total with 40%. | Above 40%: `BLOCK`; at least 36%: `WARN`. This is only a simplified concentration check, not a full UCITS eligibility review. |
-| Country exposure | Home country maximum 100%; foreign country 35%; 20% is selected for a foreign country only when an existing holding in that country is marked emerging. | Same 90%-warning and above-limit blocking rule. Default metadata marks holdings as India/non-emerging. As implemented, a first-time buy in an emerging country with no existing holding falls through to the 35% foreign-country cap. |
+| Country exposure | Home country maximum 100%; foreign country 35%; 20% is selected for a foreign country only when an existing holding in that country is marked emerging. | Foreign-country exposure warns at 90% of its cap and blocks above the cap. Home-country exposure has no near-cap warning band because near-100% exposure is expected for a domestic fund; it still blocks above 100%. Default metadata marks holdings as India/non-emerging. As implemented, a first-time buy in an emerging country with no existing holding falls through to the 35% foreign-country cap. |
 | Restricted or pledged security | Do not trade a restricted or pledged security. | `BLOCK`. |
 | Watchlist | A security marked for internal review needs human attention. | `ESCALATE`. |
 | Sell quantity | Do not sell more than available shares after existing pending sells, or sell below a required minimum holding. | `BLOCK`. |
 | Excluded ESG security | Do not make new buys in configured excluded securities (the demo includes ITC and COALINDIA). Existing shares are not automatically sold. | `BLOCK` the buy. |
 | Thermal power exposure | A buy with thermal-power-generation exposure above 20%. | `WARN`. |
 | Stale price | Do not rely on a price marked stale. | `BLOCK`. |
-| Trading liquidity | Compare order size with the lower of ADV and median ADV, then spread the participation across the plan horizon. ADV means average daily traded value. | More than 5% of effective ADV per day: `WARN`; more than 75%: `ESCALATE`. Missing ADV: `ESCALATE`. |
-| Bid-ask spread | A spread above 0.5% signals higher trading cost; above 1% is unacceptable under this POC rule. | >0.5%: `WARN`; >1%: `BLOCK`. |
+| Trading liquidity | Compare order size with the lower of ADV and median ADV, then spread the participation across the plan horizon. ADV means average daily traded value. | More than 10% of effective ADV per day: `WARN`; more than 75%: `ESCALATE`. Missing ADV: `ESCALATE`. |
+| Bid-ask spread | A spread above 0.75% signals higher trading cost; above 1% is unacceptable under this POC rule. | >0.75%: `WARN`; >1%: `BLOCK`. |
 | Foreign currency | Measure the security's foreign-currency exposure. | >10%: `WARN`; >15%: `BLOCK`. |
 | Corporate event | Warn close to an event date: within 1 day for dividend/ex-date events, within 2 days for other events. | `WARN`. Event calendar is curated, not live. |
 | Cash available | Net buys must fit within 95% of available operating cash, plus 100% of a contribution explicitly added for this plan. | Above allowed cash: `BLOCK`. |

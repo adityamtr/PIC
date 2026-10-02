@@ -7,8 +7,8 @@ import {
   Typography,
 } from '@mui/material'
 import CheckCircleIcon from '@mui/icons-material/CheckCircle'
+import EmailOutlinedIcon from '@mui/icons-material/EmailOutlined'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
-import EditIcon from '@mui/icons-material/EditOutlined'
 import CloseIcon from '@mui/icons-material/CloseOutlined'
 import NorthEastIcon from '@mui/icons-material/NorthEast'
 import { api } from '../api'
@@ -103,6 +103,17 @@ const riskToneSx = (severity) => (theme) => {
     ? { color: '#B9C6D2', bgcolor: 'rgba(125, 145, 165, 0.14)', borderColor: 'rgba(185, 198, 210, 0.28)' }
     : { color: '#526575', bgcolor: '#F0F4F7', borderColor: '#D7E0E8' })
 }
+const riskDecisionLabel = (flag) => ({
+  BLOCK: 'BLOCKED',
+  ESCALATE: 'ACTION',
+  WARN: 'REVIEW',
+}[flag.status] || (flag.severity === 'MEDIUM' ? 'REVIEW' : flag.severity))
+
+const riskDecisionTone = (flag) => (
+  flag.status === 'BLOCK' || flag.severity === 'HIGH' ? 'HIGH'
+    : flag.status === 'ESCALATE' ? 'MEDIUM'
+      : flag.status === 'WARN' || flag.severity === 'MEDIUM' ? 'REVIEW' : flag.severity
+)
 
 function RiskRegister({ flags }) {
   if (!flags.length) {
@@ -120,7 +131,9 @@ function RiskRegister({ flags }) {
     <Box sx={{ maxHeight: 360, overflowY: 'auto' }}>
       {groups.map(([category, items]) => {
         const highCount = items.filter((item) => item.severity === 'HIGH').length
-        const reviewCount = items.filter((item) => item.severity === 'MEDIUM').length
+        const actionCount = items.filter((item) => item.status === 'ESCALATE').length
+        const reviewCount = items.filter((item) => item.status === 'WARN'
+          || (!item.status && item.severity === 'MEDIUM')).length
         return (
           <Accordion key={category} disableGutters elevation={0} defaultExpanded={items.length <= 3}
             sx={{
@@ -155,7 +168,8 @@ function RiskRegister({ flags }) {
                     <Typography variant="body2" color="text.secondary" sx={{ flex: 1, minWidth: 0 }}>
                       {flag.message}
                     </Typography>
-                    <Chip size="small" label={flag.severity} variant="outlined" sx={riskToneSx(flag.severity)} />
+                    <Chip size="small" label={riskDecisionLabel(flag)} variant="outlined"
+                      sx={riskToneSx(riskDecisionTone(flag))} />
                   </Stack>
                 ))}
               </Stack>
@@ -337,7 +351,7 @@ function ForecastPanel({ forecast, orderTickers }) {
   )
 }
 
-export default function TradePlanner({ fundId }) {
+export default function TradePlanner({ fundId, onContinueToEmail }) {
   const [action, setAction] = useState('contribution')
   const [amount, setAmount] = useState(250)
   const [targets, setTargets] = useState(['Information Technology'])
@@ -919,13 +933,22 @@ export default function TradePlanner({ fundId }) {
               {!decision ? (
                 <Stack direction="row" spacing={1.5} sx={{ flexWrap: 'wrap', gap: 1.5 }}>
                   <Button variant="contained" color="success" startIcon={<CheckCircleIcon />} onClick={() => decide('Approve')}>Approve</Button>
-                  <Button variant="outlined" color="secondary" startIcon={<EditIcon />} onClick={() => decide('Modify')}>Modify</Button>
                   <Button variant="outlined" color="error" startIcon={<CloseIcon />} onClick={() => decide('Reject')}>Reject</Button>
                   <Button variant="outlined" color="warning" startIcon={<NorthEastIcon />} onClick={() => decide('Escalate')}>Escalate</Button>
                 </Stack>
               ) : (
-                <Alert severity="info">Decision recorded: <strong>{decision.decision}</strong> → {decision.status}
-                  <Typography variant="caption" display="block">by {decision.reviewer} · {new Date(decision.decided_at).toLocaleString()}</Typography>
+                <Alert severity="info">
+                  <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ sm: 'center' }}
+                    justifyContent="space-between" spacing={1.5} sx={{ width: '100%' }}>
+                    <Box>
+                      <Typography variant="body2">Decision recorded: <strong>{decision.decision}</strong> → {decision.status}</Typography>
+                      <Typography variant="caption" display="block">by {decision.reviewer} · {new Date(decision.decided_at).toLocaleString()}</Typography>
+                    </Box>
+                    <Button variant="contained" startIcon={<EmailOutlinedIcon />}
+                      onClick={() => onContinueToEmail?.(plan.plan_id)}>
+                      Continue to email
+                    </Button>
+                  </Stack>
                 </Alert>
               )}
               <Divider sx={{ my: 1.5 }} />

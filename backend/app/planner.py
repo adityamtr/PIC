@@ -339,6 +339,7 @@ def _augment_pending_trades_from_approved_plans(fund_id):
     subsequent plans."""
     approved_trades = []
     for plan in _approved_sent_plans(fund_id):
+        intent = plan.get("intent") or {}
         for order in plan.get("orders", []):
             ticker = order.get("ticker")
             side = order.get("side")
@@ -349,8 +350,8 @@ def _augment_pending_trades_from_approved_plans(fund_id):
                 continue
 
             gross = shares * price
-            trade_date_str = order.get("trade_date")
-            settlement_date_str = order.get("settlement_date")
+            trade_date_str = order.get("trade_date") or intent.get("trade_date")
+            settlement_date_str = order.get("settlement_date") or intent.get("settlement_date")
 
             if not (trade_date_str and settlement_date_str):
                 continue
@@ -1500,7 +1501,8 @@ def iter_plan_steps(fund_id, intent):
 
     compliance = _compliance_checks(ds, orders, sectors)
     risks = _risk_flags(ds, orders, risk_notes, horizon)
-    policy_result = policy.evaluate(ds, orders, cfp, horizon, tax_context=tax_context)
+    policy_result = policy.evaluate(ds, orders, cfp, horizon, tax_context=tax_context,
+                                    action=action)
     risks.extend(policy_result["risk_flags"])
     warnings.extend(policy_result["warnings"])
     redemption_requested = amount if action == "redemption" else 0.0

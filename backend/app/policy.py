@@ -12,12 +12,13 @@ from collections import defaultdict
 from . import data, data_v2, db
 
 CRORE = data.CRORE
-POLICY_VERSION = "dummy-policy-2026-09-tax1"
+POLICY_VERSION = "dummy-policy-2026-10-liquidity1"
 
 POLICY_DEFAULTS = {
     "warning_ratio": 0.90,
     "soft_warning_ratio": 0.80,
-    "liquidity_warn_adv_pct": 5.0,
+    "liquidity_warn_adv_pct": 10.0,
+    "liquidity_warn_spread_pct": 0.75,
     # Parent plans may be split over multiple sessions. A single-day order
     # should still target <=10% ADV; this ceiling applies to the scheduled plan.
     "liquidity_block_adv_pct": 75.0,
@@ -29,6 +30,7 @@ POLICY_DEFAULTS = {
     # weeks before a plan's horizon itself requires escalation.
     "max_horizon_days": 20,
     "max_cash_usage_ratio": 0.95,
+    "rebalance_cash_rounding_tolerance_cr": 0.02,
     "ucits_single_issuer_pct": 5.0,
     "ucits_aggregate_over_5_pct": 40.0,
     "country_limit_pct": 35.0,
@@ -271,16 +273,20 @@ def _concentration_checks(ds: dict, orders: list[dict], limits: dict) -> list[di
             holding.get("weight", 0) for holding in ds["holdings"]
             if _entity(ds, holding["ticker"])["country"] == country
         )
+        # Near-100% home-country exposure is expected for a domestic fund;
+        # retain the hard cap without warning on ordinary home bias.
+        country_warning_ratio = 1.01 if country == home_country else warning_ratio
         checks.append(_check(
             "COUNTRY-LIMIT", "country",
-            _incremental_limit_status(projected, current, limit, warning_ratio),
+            _incremental_limit_status(projected, current, limit, country_warning_ratio),
             country, f"{country} projected exposure is {projected:.2f}% vs {limit:.2f}%.",
             limit, projected,
         ))
     return checks
 
 
-def _order_checks(ds: dict, orders: list[dict], cash_flow: dict, horizon_days: int) -> list[dict]:
+def _order_checks(ds: dict, orders: list[dict], cash_flow: dict, horizon_days: int,
+                  action: str | None = None) -> list[dict]:
     checks = []
     for order in orders:
         ticker = order["ticker"]
@@ -373,7 +379,10 @@ def _order_checks(ds: dict, orders: list[dict], cash_flow: dict, horizon_days: i
             ))
             spread = entity.get("bid_ask_spread_pct")
             if spread is not None:
-                spread_status = "BLOCK" if spread > 1.0 else ("WARN" if spread > 0.5 else "PASS")
+                spread_status = (
+                    "BLOCK" if spread > 1.0
+                    else ("WARN" if spread > POLICY_DEFAULTS["liquidity_warn_spread_pct"] else "PASS")
+                )
                 checks.append(_check(
                     "LIQUIDITY-SPREAD", "liquidity", spread_status, ticker,
                     f"Bid-ask spread is {spread:.2f}%.", 1.0, spread,
@@ -420,11 +429,16 @@ def _order_checks(ds: dict, orders: list[dict], cash_flow: dict, horizon_days: i
     subscription = cash_flow.get("subscription_amount", 0.0)
     operational = max(cash_flow["investable_amount"] - subscription, 0.0)
     max_cash = operational * POLICY_DEFAULTS["max_cash_usage_ratio"] + subscription
-    cash_status = "PASS" if net_buy <= max_cash else "BLOCK"
+    rounding_tolerance = (
+        POLICY_DEFAULTS["rebalance_cash_rounding_tolerance_cr"] * CRORE
+        if action == "rebalance" else 0.0
+    )
+    allowed_cash = max_cash + rounding_tolerance
+    cash_status = "PASS" if net_buy <= allowed_cash else "BLOCK"
     checks.append(_check(
         "CASH-DEPLOYMENT", "cash_flow", cash_status, "plan",
-        f"Net cash deployment is {net_buy / CRORE:.2f} Cr vs allowed {max_cash / CRORE:.2f} Cr.",
-        max_cash / CRORE, net_buy / CRORE,
+        f"Net cash deployment is {net_buy / CRORE:.2f} Cr vs allowed {allowed_cash / CRORE:.2f} Cr.",
+        allowed_cash / CRORE, net_buy / CRORE,
     ))
 
     if len(orders) > POLICY_DEFAULTS["max_orders"]:
@@ -487,12 +501,12 @@ def _tax_checks(ds: dict, orders: list[dict], tax_context: dict) -> list[dict]:
 
 
 def evaluate(ds: dict, orders: list[dict], cash_flow: dict, horizon_days: int,
-             tax_context: dict | None = None) -> dict:
+             tax_context: dict | None = None, action: str | None = None) -> dict:
     """Evaluate the proposed order set against the dummy policy controls."""
     refresh_policy_from_db()
     limits = _limits(ds)
     checks = _concentration_checks(ds, orders, limits)
-    checks.extend(_order_checks(ds, orders, cash_flow, horizon_days))
+    checks.extend(_order_checks(ds, orders, cash_flow, horizon_days, action))
     if tax_context:
         checks.extend(_tax_checks(ds, orders, tax_context))
     counts = {status: sum(1 for check in checks if check["status"] == status)
@@ -504,7 +518,8 @@ def evaluate(ds: dict, orders: list[dict], cash_flow: dict, horizon_days: int,
         for check in checks if check["status"] in ("WARN", "ESCALATE")
     ]
     risk_flags = [
-        {"type": check["category"], "severity": "HIGH" if check["status"] == "BLOCK" else "MEDIUM",
+        {"type": check["category"], "code": check["code"], "status": check["status"],
+         "severity": "HIGH" if check["status"] == "BLOCK" else "MEDIUM",
          "ticker": check["entity"], "message": check["message"]}
         for check in checks if check["status"] in ("WARN", "BLOCK", "ESCALATE")
     ]

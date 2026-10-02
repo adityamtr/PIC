@@ -329,17 +329,25 @@ def list_trade_plans(fund_id: str | None = Query(None)):
     # two must stay distinguishable so a reset doesn't get backfilled by stale
     # in-memory plans from before the reset.
     plans = db.list_plans(fund_id)
-    if plans is not None:
-        ordered = sorted(plans, key=lambda plan: plan.get("created_at") or "", reverse=True)
-        return {"plans": ordered, "count": len(ordered)}
-    # DB unreachable: in-memory cache is the only thing we have. Only plans with
-    # a recorded decision count as "history" (matches the DB path, where a plan
-    # is written only once decided).
-    in_memory = [
-        plan for plan in _PLANS.values()
-        if plan.get("decision") and (fund_id is None or plan.get("fund", {}).get("fund_id") == fund_id)
+    if plans is None:
+        # DB unreachable: in-memory cache is the only thing we have. Only plans
+        # with a recorded decision count as "history" (matches the DB path).
+        plans = [
+            plan for plan in _PLANS.values()
+            if plan.get("decision") and (fund_id is None or plan.get("fund", {}).get("fund_id") == fund_id)
+        ]
+    ordered = sorted(plans, key=lambda plan: plan.get("created_at") or "", reverse=True)
+    email_summaries = db.list_sent_email_summaries() or {}
+    ordered = [
+        {
+            **plan,
+            **email_summaries.get(plan.get("plan_id"), {
+                "sent_email_count": 0,
+                "last_sent_email_at": None,
+            }),
+        }
+        for plan in ordered
     ]
-    ordered = sorted(in_memory, key=lambda plan: plan.get("created_at") or "", reverse=True)
     return {"plans": ordered, "count": len(ordered)}
 
 
@@ -357,9 +365,9 @@ def generate_trade_plan_email(plan_id: str):
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
     decision = (plan.get("decision") or {}).get("decision")
-    is_approved = decision == "Approve" if decision else str(plan.get("status", "")).lower().startswith("approved")
-    if not is_approved:
-        raise HTTPException(status_code=409, detail="Email drafts are available only for approved plans")
+    decision = decision or ("Approve" if str(plan.get("status", "")).lower().startswith("approved") else None)
+    if decision not in {"Approve", "Reject", "Escalate"}:
+        raise HTTPException(status_code=409, detail="Email drafts are available after approval, rejection, or escalation")
     try:
         draft = email_draft.generate_email_template(plan)
     except email_draft.EmailDraftConfigurationError as exc:
@@ -375,9 +383,9 @@ def send_trade_plan_email(plan_id: str, content: SendEmailRequest):
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
     decision = (plan.get("decision") or {}).get("decision")
-    is_approved = decision == "Approve" if decision else str(plan.get("status", "")).lower().startswith("approved")
-    if not is_approved:
-        raise HTTPException(status_code=409, detail="Emails can be sent only for approved plans")
+    decision = decision or ("Approve" if str(plan.get("status", "")).lower().startswith("approved") else None)
+    if decision not in {"Approve", "Reject", "Escalate"}:
+        raise HTTPException(status_code=409, detail="Emails can be sent after approval, rejection, or escalation")
     sent_at = datetime.now(timezone.utc).isoformat()
     sent_email = db.create_sent_email({
         "plan_id": plan_id,
@@ -406,7 +414,7 @@ def decide_trade_plan(plan_id: str, req: DecisionRequest):
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
     status_map = {
-        "Approve": "Approved — sent to Trading", "Modify": "Returned for Modification",
+        "Approve": "Approved — sent to Trading",
         "Reject": "Rejected", "Escalate": "Escalated to PIC Lead / PM",
     }
     new_status = status_map[req.decision]
