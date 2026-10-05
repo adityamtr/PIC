@@ -860,11 +860,13 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
         <Grow in timeout={450}>
           <Stack spacing={2.5}>
             <GenerationStepsSummary events={progressEvents} />
-            <Stack direction="row" justifyContent="flex-end" sx={{ mb: -1.5 }}>
+            <Stack direction="row" sx={{ width: '100%', mb: -1.5 }}>
               <Tooltip title="Close generated plan">
-                <IconButton size="small" onClick={closePlan} aria-label="Close generated plan">
-                  <CloseIcon fontSize="small" />
-                </IconButton>
+                <Box component="span" sx={{ display: 'inline-flex', ml: 'auto' }}>
+                  <IconButton size="small" onClick={closePlan} aria-label="Close generated plan">
+                    <CloseIcon fontSize="small" />
+                  </IconButton>
+                </Box>
               </Tooltip>
             </Stack>
             {s.redemption_shortfall_cr > 0 && (
