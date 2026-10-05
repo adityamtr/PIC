@@ -1,8 +1,12 @@
 import { useEffect, useState } from 'react'
-import { Box, CircularProgress, Fade, LinearProgress, Stack, Typography } from '@mui/material'
+import {
+  Accordion, AccordionDetails, AccordionSummary, Box, CircularProgress, Fade, LinearProgress, Stack, Typography,
+} from '@mui/material'
 import AccountBalanceWalletOutlinedIcon from '@mui/icons-material/AccountBalanceWalletOutlined'
 import AutoGraphOutlinedIcon from '@mui/icons-material/AutoGraphOutlined'
 import CheckIcon from '@mui/icons-material/Check'
+import CheckCircleIcon from '@mui/icons-material/CheckCircle'
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import FactCheckOutlinedIcon from '@mui/icons-material/FactCheckOutlined'
 import ShieldOutlinedIcon from '@mui/icons-material/ShieldOutlined'
 import { Panel } from './ui'
@@ -71,11 +75,13 @@ function StepLine({ label, detail }) {
 }
 
 // `events` is the list of real granular progress events received so far, each
-// shaped { phase, index, total, step, label, detail, data }.
-export default function PlanGenerationProgress({ events = [] }) {
+// shaped { phase, index, total, step, label, detail, data }. `done` flips once
+// the plan has actually arrived, so the bar can finish at 100% with every
+// stage ticked instead of freezing at the last stage's "active" state.
+export default function PlanGenerationProgress({ events = [], done = false }) {
   const total = events[0]?.total || STAGES.length
-  const activePhaseIndex = events.length ? events[events.length - 1].index : 0
-  const progress = Math.round((activePhaseIndex / total) * 100)
+  const activePhaseIndex = done ? total : (events.length ? events[events.length - 1].index : 0)
+  const progress = done ? 100 : Math.round((activePhaseIndex / total) * 100)
 
   const stepsByPhase = new Map()
   for (const e of events) {
@@ -85,17 +91,26 @@ export default function PlanGenerationProgress({ events = [] }) {
 
   return (
     <Panel highlight bodySx={{ py: 3 }}>
-      <Box aria-live="polite" aria-busy="true">
+      <Box aria-live="polite" aria-busy={!done}>
         <Box>
           <Stack direction="row" alignItems="center" spacing={1}>
-            <CircularProgress size={16} thickness={5} />
-            <RotatingStatusWord />
+            {done
+              ? <Fade in timeout={300}><CheckCircleIcon sx={{ fontSize: 18, color: 'success.main' }} /></Fade>
+              : <CircularProgress size={16} thickness={5} />}
+            {done
+              ? <Typography component="span" variant="overline"
+                  sx={{ fontWeight: 800, letterSpacing: 0.8, color: 'success.main' }}>
+                  Done…
+                </Typography>
+              : <RotatingStatusWord />}
           </Stack>
           <Typography variant="subtitle1" sx={{ fontWeight: 700, mt: 0.25 }}>
-            Building a decision-ready trade plan
+            {done ? 'Plan is ready' : 'Building a decision-ready trade plan'}
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-            The planning agent is working through the controls behind your recommendation.
+            {done
+              ? 'All checks passed. Opening the plan for review…'
+              : 'The planning agent is working through the controls behind your recommendation.'}
           </Typography>
         </Box>
 
@@ -145,6 +160,58 @@ export default function PlanGenerationProgress({ events = [] }) {
           })}
         </Stack>
       </Box>
+    </Panel>
+  )
+}
+
+// Read-only recap of the same granular steps, shown collapsed inside the
+// finished plan so the user can see exactly which checks/rules ran without
+// re-triggering generation. `events` is the same array PlanGenerationProgress
+// was fed while loading.
+export function GenerationStepsSummary({ events = [] }) {
+  if (!events.length) return null
+
+  const stepsByPhase = new Map()
+  for (const e of events) {
+    if (!stepsByPhase.has(e.phase)) stepsByPhase.set(e.phase, [])
+    stepsByPhase.get(e.phase).push(e)
+  }
+  const stepCount = events.filter((e) => e.step).length
+
+  return (
+    <Panel icon={<FactCheckOutlinedIcon />} title="How this plan was generated" bodySx={{ pb: 0 }}>
+      <Accordion disableGutters elevation={0} sx={{
+        bgcolor: 'transparent', mt: -1,
+        '&:before': { display: 'none' },
+      }}>
+        <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={{ px: 0, minHeight: 40,
+          '& .MuiAccordionSummary-content': { my: 1 } }}>
+          <Typography variant="body2" color="text.secondary">
+            {stepCount} check{stepCount === 1 ? '' : 's'} across {STAGES.length} stages — view the detail
+          </Typography>
+        </AccordionSummary>
+        <AccordionDetails sx={{ px: 0, pt: 0, pb: 1.5 }}>
+          <Stack spacing={0}>
+            {STAGES.map((stage) => {
+              const steps = stepsByPhase.get(stage.phase) || []
+              if (!steps.length) return null
+              const Icon = stage.icon
+              return (
+                <Stack key={stage.phase} direction="row" spacing={1.5} alignItems="flex-start" sx={{ py: 1.25 }}>
+                  <Box sx={{ width: 28, height: 28, borderRadius: '50%', display: 'grid', placeItems: 'center',
+                    flexShrink: 0, bgcolor: 'action.selected', color: 'primary.main', border: 1, borderColor: 'primary.main' }}>
+                    <Icon fontSize="small" />
+                  </Box>
+                  <Box sx={{ minWidth: 0, pt: 0.25, flex: 1 }}>
+                    <Typography variant="body2" fontWeight={700}>{stage.title}</Typography>
+                    {steps.map((s) => <StepLine key={s.step} label={s.label} detail={s.detail} />)}
+                  </Box>
+                </Stack>
+              )
+            })}
+          </Stack>
+        </AccordionDetails>
+      </Accordion>
     </Panel>
   )
 }

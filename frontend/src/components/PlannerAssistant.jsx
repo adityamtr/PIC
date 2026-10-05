@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions, DialogContent,
-  DialogTitle, Divider, IconButton, Paper, Stack, TextField, Tooltip, Typography,
+  DialogTitle, Divider, IconButton, Menu, MenuItem, Paper, Stack, TextField, Tooltip, Typography,
 } from '@mui/material'
 import AutoAwesomeOutlinedIcon from '@mui/icons-material/AutoAwesomeOutlined'
 import ClearAllOutlinedIcon from '@mui/icons-material/ClearAllOutlined'
 import CloseFullscreenOutlinedIcon from '@mui/icons-material/CloseFullscreenOutlined'
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutlineOutlined'
+import HistoryOutlinedIcon from '@mui/icons-material/HistoryOutlined'
 import OpenInFullOutlinedIcon from '@mui/icons-material/OpenInFullOutlined'
 import SendOutlinedIcon from '@mui/icons-material/SendOutlined'
 import ReactMarkdown from 'react-markdown'
@@ -18,11 +20,63 @@ const FIELD_LABELS = {
   settlement_date: 'Settlement date', target_volatility: 'Risk target',
 }
 
-const PRE_PLAN_PROMPTS = [
-  'Create a contribution plan for ₹250 Cr using the optimizer.',
-  'Increase Information Technology by ₹50 Cr and create a plan.',
-  'Rebalance this fund using rules-based allocation.',
-]
+const MAX_SUGGESTIONS = 2
+const SESSION_KEY = 'pic-assistant-chat-session'
+const ARCHIVE_KEY = 'pic-assistant-chat-archive'
+const MAX_ARCHIVED_SESSIONS = 20
+
+function loadSession() {
+  try {
+    const raw = window.sessionStorage.getItem(SESSION_KEY)
+    return raw ? JSON.parse(raw) : null
+  } catch {
+    return null
+  }
+}
+
+// Past conversations survive "Clear chat" (and the browser tab closing) so
+// the user can come back and reopen one later — kept in localStorage rather
+// than the per-tab sessionStorage used for the live conversation.
+function loadArchive() {
+  try {
+    const raw = window.localStorage.getItem(ARCHIVE_KEY)
+    const parsed = raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function saveArchive(sessions) {
+  try {
+    window.localStorage.setItem(ARCHIVE_KEY, JSON.stringify(sessions))
+  } catch {
+    // localStorage unavailable (private mode, quota) — archive just won't persist.
+  }
+}
+
+function sessionTitle(messages) {
+  const firstUser = messages.find((item) => item.role === 'user')
+  if (!firstUser) return 'Untitled conversation'
+  return firstUser.content.length > 48 ? `${firstUser.content.slice(0, 48)}…` : firstUser.content
+}
+
+// Shown only before the first message, when there's no chat yet to generate
+// real suggestions from. Once a reply comes back, the model's own
+// conversation-grounded suggestions (see `suggestedPrompts`) take over.
+function starterPrompts(plan, funds, fundId) {
+  if (plan?.plan_id) {
+    return ['Can you explain this plan in simple terms?', 'Which orders are the biggest?'].slice(0, MAX_SUGGESTIONS)
+  }
+  const current = funds.find((fund) => fund.fund_id === fundId) || funds[0]
+  const other = funds.find((fund) => fund.fund_id !== current?.fund_id)
+  const prompts = []
+  if (current) prompts.push(`Redeem ₹10 Cr from ${current.name}`)
+  prompts.push(other
+    ? `Switch to ${other.name} and rebalance it for me`
+    : 'Build me a plan to invest ₹250 Cr, optimized automatically')
+  return prompts.slice(0, MAX_SUGGESTIONS)
+}
 
 function displayValue(key, value, funds) {
   if (key === 'fund_id') return funds.find((fund) => fund.fund_id === value)?.name || value
@@ -39,30 +93,35 @@ function displayValue(key, value, funds) {
   return String(value)
 }
 
-function hasPlanIssues(plan) {
-  return plan.execution_allowed === false
-    || plan.policy_status === 'BLOCK' || plan.policy_status === 'ESCALATE'
-    || plan.summary?.compliance_status === 'FAIL'
-    || (plan.policy_checks || []).some((check) => check.status !== 'PASS')
-    || (plan.compliance_checks || []).some((check) => check.status !== 'PASS')
-}
-
 export default function PlannerAssistant({
   fundId, funds, draft, sectors, securities, plan, onApplyUpdates, onGeneratePlan, busy,
 }) {
-  const [messages, setMessages] = useState([])
+  const [messages, setMessages] = useState(() => loadSession()?.messages || [])
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
   const [error, setError] = useState('')
   const [confirmation, setConfirmation] = useState(null)
   const [generating, setGenerating] = useState(false)
   const [fullPage, setFullPage] = useState(false)
+  const [suggestedPrompts, setSuggestedPrompts] = useState(() => loadSession()?.suggestedPrompts || [])
+  const [pastSessions, setPastSessions] = useState(() => loadArchive())
+  const [sessionsAnchor, setSessionsAnchor] = useState(null)
   const endRef = useRef(null)
   const previousPlanId = useRef(null)
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
   }, [messages, sending])
+
+  // Persist the conversation for the lifetime of the browser tab, so a reload
+  // recalls prior messages — only "Clear chat" actually resets it.
+  useEffect(() => {
+    try {
+      window.sessionStorage.setItem(SESSION_KEY, JSON.stringify({ messages, suggestedPrompts }))
+    } catch {
+      // sessionStorage unavailable (private mode, quota) — chat still works in-memory.
+    }
+  }, [messages, suggestedPrompts])
 
   useEffect(() => {
     const nextPlanId = plan?.plan_id || null
@@ -89,15 +148,18 @@ export default function PlannerAssistant({
     addMessage({ role: 'user', content: message })
     setInput('')
     setError('')
+    setSuggestedPrompts([])
     setSending(true)
     try {
       if (plan?.plan_id) {
         const result = await api.assistantChat(plan.plan_id, message, history)
         addMessage({ role: 'assistant', content: result.reply, toolsUsed: result.tools_used })
+        setSuggestedPrompts((result.suggested_prompts || []).slice(0, MAX_SUGGESTIONS))
       } else {
         const result = await api.interpretIntent({
           message,
           draft,
+          history,
         })
         if (Object.keys(result.updates || {}).length) {
           await onApplyUpdates(result.updates)
@@ -107,6 +169,7 @@ export default function PlannerAssistant({
           readyToGenerate: result.ready_to_generate,
           requestedText: message,
         })
+        setSuggestedPrompts((result.suggested_prompts || []).slice(0, MAX_SUGGESTIONS))
       }
     } catch (requestError) {
       setError(requestError.message || 'The assistant could not complete this request.')
@@ -125,20 +188,53 @@ export default function PlannerAssistant({
     }
   }
 
-  const quickPrompts = plan?.plan_id
-    ? [
-      'Explain the plan',
-      'Which orders have the largest values?',
-      ...(hasPlanIssues(plan) ? ['Describe the compliance and policy issues'] : []),
-    ]
-    : PRE_PLAN_PROMPTS
+  // Stashes the live conversation into the archive so it's not lost when
+  // clearing or switching to a previously saved session.
+  function archiveCurrentSession() {
+    if (!messages.length) return
+    const archived = {
+      id: `${Date.now()}`,
+      savedAt: Date.now(),
+      title: sessionTitle(messages),
+      messages,
+      suggestedPrompts,
+    }
+    setPastSessions((current) => {
+      const next = [archived, ...current].slice(0, MAX_ARCHIVED_SESSIONS)
+      saveArchive(next)
+      return next
+    })
+  }
 
   function clearChat() {
+    archiveCurrentSession()
     setMessages([])
     setInput('')
     setError('')
     setConfirmation(null)
+    setSuggestedPrompts([])
+    try { window.sessionStorage.removeItem(SESSION_KEY) } catch { /* ignore */ }
   }
+
+  function openPastSession(session) {
+    archiveCurrentSession()
+    setMessages(session.messages)
+    setSuggestedPrompts(session.suggestedPrompts || [])
+    setInput('')
+    setError('')
+    setConfirmation(null)
+    setSessionsAnchor(null)
+  }
+
+  function deletePastSession(id) {
+    setPastSessions((current) => {
+      const next = current.filter((session) => session.id !== id)
+      saveArchive(next)
+      return next
+    })
+  }
+
+  const displayedPrompts = messages.length === 0 ? starterPrompts(plan, funds, fundId) : suggestedPrompts
 
   return (
     <Paper component="aside" variant="outlined" sx={(theme) => ({
@@ -152,7 +248,8 @@ export default function PlannerAssistant({
       gridArea: 'assistant',
     })}>
       <Box sx={{ px: 2, py: 1.5, bgcolor: 'background.paper' }}>
-        <Stack direction="row" spacing={1} alignItems="center">
+        <Stack direction="row" spacing={1} alignItems="center"
+          sx={fullPage ? { maxWidth: 820, mx: 'auto', width: '100%' } : undefined}>
           <AutoAwesomeOutlinedIcon fontSize="small" color="secondary" />
           <Box sx={{ minWidth: 0, flex: 1 }}>
             <Typography variant="subtitle1" fontWeight={750}>Planner assistant</Typography>
@@ -160,28 +257,62 @@ export default function PlannerAssistant({
               {plan?.plan_id ? 'Read-only plan review' : 'Describe the plan you want to prepare'}
             </Typography>
           </Box>
-          {plan?.plan_id && <Chip size="small" variant="outlined" label="Read only" />}
-          <Tooltip title="Clear chat">
-            <span>
-              <IconButton aria-label="Clear chat" size="small" onClick={clearChat}
-                disabled={sending || (!messages.length && !error && !input)}>
-                <ClearAllOutlinedIcon fontSize="small" />
-              </IconButton>
-            </span>
-          </Tooltip>
-          <Tooltip title={fullPage ? 'Return to side chat' : 'Expand chat to full page'}>
-            <IconButton aria-label={fullPage ? 'Return to side chat' : 'Expand chat to full page'} size="small"
-              onClick={() => setFullPage((current) => !current)}>
-              {fullPage
-                ? <CloseFullscreenOutlinedIcon fontSize="small" />
-                : <OpenInFullOutlinedIcon fontSize="small" />}
-            </IconButton>
-          </Tooltip>
+          <Stack direction="row" spacing={0.5} alignItems="center">
+            <Tooltip title="Previous chat sessions">
+              <Box component="span" sx={{ display: 'inline-flex' }}>
+                <IconButton aria-label="Previous chat sessions" size="small"
+                  onClick={(event) => setSessionsAnchor(event.currentTarget)}>
+                  <HistoryOutlinedIcon fontSize="small" />
+                </IconButton>
+              </Box>
+            </Tooltip>
+            <Menu anchorEl={sessionsAnchor} open={Boolean(sessionsAnchor)} onClose={() => setSessionsAnchor(null)}
+              anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+              transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+              slotProps={{ paper: { sx: { width: 300, maxWidth: '90vw' } } }}>
+              {pastSessions.length === 0 ? (
+                <MenuItem disabled>No previous sessions yet</MenuItem>
+              ) : pastSessions.map((session) => (
+                <MenuItem key={session.id} onClick={() => openPastSession(session)}
+                  sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  <Box sx={{ minWidth: 0, flex: 1 }}>
+                    <Typography variant="body2" noWrap>{session.title}</Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {new Date(session.savedAt).toLocaleString()}
+                    </Typography>
+                  </Box>
+                  <IconButton size="small" aria-label="Delete session"
+                    onClick={(event) => { event.stopPropagation(); deletePastSession(session.id) }}>
+                    <DeleteOutlineIcon fontSize="small" />
+                  </IconButton>
+                </MenuItem>
+              ))}
+            </Menu>
+            <Tooltip title="Clear chat">
+              <Box component="span" sx={{ display: 'inline-flex' }}>
+                <IconButton aria-label="Clear chat" size="small" onClick={clearChat}
+                  disabled={sending || (!messages.length && !error && !input)}>
+                  <ClearAllOutlinedIcon fontSize="small" />
+                </IconButton>
+              </Box>
+            </Tooltip>
+            <Tooltip title={fullPage ? 'Return to side chat' : 'Expand chat to full page'}>
+              <Box component="span" sx={{ display: 'inline-flex' }}>
+                <IconButton aria-label={fullPage ? 'Return to side chat' : 'Expand chat to full page'} size="small"
+                  onClick={() => setFullPage((current) => !current)}>
+                  {fullPage
+                    ? <CloseFullscreenOutlinedIcon fontSize="small" />
+                    : <OpenInFullOutlinedIcon fontSize="small" />}
+                </IconButton>
+              </Box>
+            </Tooltip>
+          </Stack>
         </Stack>
       </Box>
 
       <Divider />
       <Box sx={{ flex: 1, minHeight: 0, overflowY: 'auto', px: 1.5, py: 1.5 }}>
+        <Box sx={fullPage ? { maxWidth: 820, mx: 'auto' } : undefined}>
         {messages.length === 0 && (
           <Box sx={{ px: 0.5, py: 1 }}>
             <Typography variant="body2" color="text.secondary">
@@ -259,19 +390,29 @@ export default function PlannerAssistant({
           )}
           <div ref={endRef} />
         </Stack>
+        </Box>
       </Box>
 
-      {error && <Alert severity="error" sx={{ mx: 1.5, mb: 1 }}>{error}</Alert>}
+      {error && (
+        <Box sx={fullPage ? { maxWidth: 820, mx: 'auto', width: '100%' } : undefined}>
+          <Alert severity="error" sx={{ mx: 1.5, mb: 1 }}>{error}</Alert>
+        </Box>
+      )}
 
       <Box sx={{ px: 1.5, pb: 1 }}>
-        <Stack spacing={0.5} sx={{ mb: 1 }}>
-          {quickPrompts.map((prompt) => (
-            <Chip key={prompt} size="small" label={prompt} variant="outlined"
-              sx={{ height: 'auto', width: '100%', justifyContent: 'flex-start',
-                '& .MuiChip-label': { display: 'block', whiteSpace: 'normal', py: 0.5, textAlign: 'left' } }}
-              disabled={sending || busy} onClick={() => submit(prompt)} />
-          ))}
-        </Stack>
+        <Box sx={fullPage ? { maxWidth: 820, mx: 'auto' } : undefined}>
+        <Box sx={{ mb: 1, minHeight: 36 }}>
+          {displayedPrompts.length > 0 && (
+            <Stack direction="row" alignItems="flex-start" sx={{ flexWrap: 'wrap', gap: 0.75 }}>
+              {displayedPrompts.map((prompt) => (
+                <Chip key={prompt} size="small" label={prompt} variant="outlined"
+                  sx={{ height: 'auto', maxWidth: '100%',
+                    '& .MuiChip-label': { display: 'block', whiteSpace: 'normal', py: 0.65, lineHeight: 1.3, textAlign: 'left' } }}
+                  disabled={sending || busy} onClick={() => submit(prompt)} />
+              ))}
+            </Stack>
+          )}
+        </Box>
         <Stack direction="row" alignItems="flex-end" spacing={0.75}>
           <TextField fullWidth multiline maxRows={4} size="small"
             placeholder={plan?.plan_id ? 'Ask about this plan' : 'Describe an intent or ask for a plan'}
@@ -292,6 +433,7 @@ export default function PlannerAssistant({
             </span>
           </Tooltip>
         </Stack>
+        </Box>
       </Box>
 
       <Dialog open={Boolean(confirmation)} onClose={() => setConfirmation(null)} maxWidth="xs" fullWidth>

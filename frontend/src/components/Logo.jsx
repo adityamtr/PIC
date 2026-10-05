@@ -1,35 +1,27 @@
-// WealthVector brand mark: a gradient tile carrying an ascending "W" chart-line
-// that resolves into a rising vector arrow — Wealth (the W / upward book value)
-// + Vector (the directed arrow). Valley nodes read it as a growth chart; a top
-// sheen and inner hairline give it depth. Scales cleanly at any size.
-export function Logo({ size = 36, rounded = 12 }) {
+// PIC Tool stitched monogram with a verified-status badge.
+export function Logo({ size = 36, rounded = 12, mode = 'light' }) {
+  const surface = mode === 'dark' ? '#172326' : '#FFFFFF'
+
   return (
     <svg width={size} height={size} viewBox="0 0 40 40" fill="none"
-      xmlns="http://www.w3.org/2000/svg" role="img" aria-label="WealthVector">
+      xmlns="http://www.w3.org/2000/svg" role="img" aria-label="PIC Tool">
       <defs>
-        <linearGradient id="wv-grad" x1="4" y1="2" x2="36" y2="38" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#6366F1" />
-          <stop offset="0.5" stopColor="#8B5CF6" />
-          <stop offset="1" stopColor="#06B6D4" />
-        </linearGradient>
-        <linearGradient id="wv-sheen" x1="20" y1="0" x2="20" y2="24" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#fff" stopOpacity="0.22" />
-          <stop offset="1" stopColor="#fff" stopOpacity="0" />
+        <linearGradient id="pic-grad" x1="4" y1="2" x2="36" y2="38" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#087F70" />
+          <stop offset="0.62" stopColor="#317E9E" />
+          <stop offset="1" stopColor="#C77917" />
         </linearGradient>
       </defs>
-      <rect width="40" height="40" rx={rounded} fill="url(#wv-grad)" />
-      <rect width="40" height="40" rx={rounded} fill="url(#wv-sheen)" />
-      <rect x="0.6" y="0.6" width="38.8" height="38.8" rx={rounded - 0.6}
-        fill="none" stroke="#fff" strokeOpacity="0.18" strokeWidth="1.2" />
-      {/* ascending W that trends upward like a growth chart */}
-      <path d="M7.5 24 L13.5 29.5 L20 21 L26.5 27.5 L32 12"
-        stroke="#fff" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
-      {/* direction-aligned arrowhead -> the vector tip */}
-      <path d="M27.8 15.6 L32 12 L33 17.4"
-        stroke="#fff" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
-      {/* valley data-points */}
-      <circle cx="13.5" cy="29.5" r="1.4" fill="#fff" fillOpacity="0.92" />
-      <circle cx="26.5" cy="27.5" r="1.4" fill="#fff" fillOpacity="0.92" />
+      <rect width="40" height="40" rx={rounded} fill="url(#pic-grad)" />
+      <rect x="2.5" y="2.5" width="35" height="35" rx={Math.max(rounded - 3, 1)}
+        fill="none" stroke="#FFFFFF" strokeOpacity="0.58" strokeWidth="1.1"
+        strokeDasharray="2 2" />
+      <text x="20" y="27" textAnchor="middle" fill="#FFFFFF"
+        fontFamily="Arial, sans-serif" fontSize="23" fontWeight="800">P</text>
+      <circle cx="32" cy="32" r="7" fill={surface} />
+      <circle cx="32" cy="32" r="5.5" fill="#138A68" />
+      <path d="m29.5 32 1.7 1.7 3.4-3.8" stroke="#FFFFFF" strokeWidth="1.5"
+        strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   )
 }

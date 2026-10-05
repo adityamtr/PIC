@@ -112,14 +112,15 @@ class EmailDraftResponse(BaseModel):
     model: str
 
 
-class AssistantInterpretRequest(BaseModel):
-    message: str = Field(..., min_length=1, max_length=4000)
-    draft: dict[str, Any] = Field(default_factory=dict)
-
-
 class AssistantChatMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str = Field(..., min_length=1, max_length=3000)
+
+
+class AssistantInterpretRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=4000)
+    draft: dict[str, Any] = Field(default_factory=dict)
+    history: list[AssistantChatMessage] = Field(default_factory=list, max_length=10)
 
 
 class AssistantChatRequest(BaseModel):
@@ -132,6 +133,7 @@ class AssistantChatResponse(BaseModel):
     reply: str
     model: str
     tools_used: list[str]
+    suggested_prompts: list[str] = Field(default_factory=list)
 
 
 class SendEmailRequest(BaseModel):
