@@ -379,6 +379,7 @@ def interpret_trade_intent(req: AssistantInterpretRequest):
             funds,
             sorted(sectors),
             sorted(securities),
+            [item.model_dump() for item in req.history],
         )
     except assistant.AssistantConfigurationError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

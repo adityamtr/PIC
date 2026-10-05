@@ -5,6 +5,7 @@ import {
 import AccountBalanceWalletOutlinedIcon from '@mui/icons-material/AccountBalanceWalletOutlined'
 import AutoGraphOutlinedIcon from '@mui/icons-material/AutoGraphOutlined'
 import CheckIcon from '@mui/icons-material/Check'
+import CheckCircleIcon from '@mui/icons-material/CheckCircle'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import FactCheckOutlinedIcon from '@mui/icons-material/FactCheckOutlined'
 import ShieldOutlinedIcon from '@mui/icons-material/ShieldOutlined'
@@ -74,11 +75,13 @@ function StepLine({ label, detail }) {
 }
 
 // `events` is the list of real granular progress events received so far, each
-// shaped { phase, index, total, step, label, detail, data }.
-export default function PlanGenerationProgress({ events = [] }) {
+// shaped { phase, index, total, step, label, detail, data }. `done` flips once
+// the plan has actually arrived, so the bar can finish at 100% with every
+// stage ticked instead of freezing at the last stage's "active" state.
+export default function PlanGenerationProgress({ events = [], done = false }) {
   const total = events[0]?.total || STAGES.length
-  const activePhaseIndex = events.length ? events[events.length - 1].index : 0
-  const progress = Math.round((activePhaseIndex / total) * 100)
+  const activePhaseIndex = done ? total : (events.length ? events[events.length - 1].index : 0)
+  const progress = done ? 100 : Math.round((activePhaseIndex / total) * 100)
 
   const stepsByPhase = new Map()
   for (const e of events) {
@@ -88,17 +91,26 @@ export default function PlanGenerationProgress({ events = [] }) {
 
   return (
     <Panel highlight bodySx={{ py: 3 }}>
-      <Box aria-live="polite" aria-busy="true">
+      <Box aria-live="polite" aria-busy={!done}>
         <Box>
           <Stack direction="row" alignItems="center" spacing={1}>
-            <CircularProgress size={16} thickness={5} />
-            <RotatingStatusWord />
+            {done
+              ? <Fade in timeout={300}><CheckCircleIcon sx={{ fontSize: 18, color: 'success.main' }} /></Fade>
+              : <CircularProgress size={16} thickness={5} />}
+            {done
+              ? <Typography component="span" variant="overline"
+                  sx={{ fontWeight: 800, letterSpacing: 0.8, color: 'success.main' }}>
+                  Done…
+                </Typography>
+              : <RotatingStatusWord />}
           </Stack>
           <Typography variant="subtitle1" sx={{ fontWeight: 700, mt: 0.25 }}>
-            Building a decision-ready trade plan
+            {done ? 'Plan is ready' : 'Building a decision-ready trade plan'}
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-            The planning agent is working through the controls behind your recommendation.
+            {done
+              ? 'All checks passed. Opening the plan for review…'
+              : 'The planning agent is working through the controls behind your recommendation.'}
           </Typography>
         </Box>
 

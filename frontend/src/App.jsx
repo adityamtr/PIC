@@ -64,11 +64,17 @@ export default function App() {
         sx={{ borderBottom: 1, borderColor: 'divider', bgcolor: 'background.paper' }}>
         <Toolbar sx={{ gap: 1.25, flexWrap: { xs: 'wrap', sm: 'nowrap' },
           py: { xs: 1, sm: 0 }, minHeight: { xs: 'auto', sm: 64 } }}>
-          <Logo size={34} />
-          <Typography variant="h6" sx={{ fontWeight: 800,
-            background: BRAND_GRADIENT, WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
-            PIC Tool
-          </Typography>
+          <Logo size={38} />
+          <Box sx={{ lineHeight: 1.1 }}>
+            <Typography variant="h6" sx={{ fontWeight: 800, letterSpacing: 0.2, lineHeight: 1.2,
+              background: BRAND_GRADIENT, WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+              PIC Tool
+            </Typography>
+            <Typography variant="caption" color="text.secondary"
+              sx={{ display: { xs: 'none', sm: 'block' }, letterSpacing: 0.6, textTransform: 'uppercase', fontWeight: 600 }}>
+              Trade-Plan Workbench
+            </Typography>
+          </Box>
           <Box sx={{ flexGrow: { xs: 0, sm: 1 }, width: { xs: 0, sm: 'auto' } }} />
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0,
             width: { xs: '100%', sm: 'auto' }, flex: { sm: '0 0 auto' } }}>

@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
-  Accordion, AccordionDetails, AccordionSummary, Alert, Box, Button, Checkbox, Chip, CircularProgress, Divider, Grow,
+  Accordion, AccordionDetails, AccordionSummary, Alert, Box, Button, Checkbox, Chip, CircularProgress, Collapse, Divider, Grow,
   FormControl, IconButton, InputLabel, ListItemText, MenuItem, Select, Stack, Step, StepLabel,
   Stepper, Table, TableBody, TableCell, TableHead, TableRow, TextField,
   ToggleButton, ToggleButtonGroup, Tooltip,
@@ -390,6 +390,7 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
   const [targetVolatility, setTargetVolatility] = useState(null)
   const [plan, setPlan] = useState(null)
   const [busy, setBusy] = useState(false)
+  const [finishing, setFinishing] = useState(false)
   const [progressEvents, setProgressEvents] = useState([])
   const [error, setError] = useState(null)
   const [validationWarning, setValidationWarning] = useState('')
@@ -398,6 +399,7 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
   const [universe, setUniverse] = useState([])
   const [holdings, setHoldings] = useState([])
   const [assistantHighlight, setAssistantHighlight] = useState('')
+  const progressRef = useRef(null)
   const today = dateOffset(0)
   const latestTradeDate = dateMonthOffset(1)
   const securityOptions = [...universe, ...holdings.filter((h) => !universe.some((u) => u.ticker === h.ticker))]
@@ -420,6 +422,19 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
   const visibleManualSectorSelections = manualSectorSelections.filter(
     (selection) => targets.includes(selection.sector) && sectorOptions.includes(selection.sector),
   )
+
+  // Scroll the loading messages into view as soon as generation starts. The
+  // panel is inside a <Collapse unmountOnExit>, so right when `busy` flips
+  // true its height is still animating open (0 -> full) — scrolling once,
+  // synchronously, can land short of the final position. Scroll after paint
+  // and again once the collapse's own 500ms transition has finished.
+  useEffect(() => {
+    if (!busy) return
+    const scroll = () => progressRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    const raf = requestAnimationFrame(scroll)
+    const settleTimer = window.setTimeout(scroll, 550)
+    return () => { cancelAnimationFrame(raf); window.clearTimeout(settleTimer) }
+  }, [busy])
 
   // On fund change: clear any plan and load the fund's sectors for the dropdown.
   useEffect(() => {
@@ -514,13 +529,15 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
       return
     }
     setValidationWarning('')
-    setBusy(true); setError(null); setDecision(null); setPlan(null); setProgressEvents([])
+    setBusy(true); setError(null); setDecision(null); setPlan(null); setProgressEvents([]); setFinishing(false)
     try {
       const payload = {
         action,
         amount_cr: needsTopLevelAmount ? Number(amount) : undefined,
         targets: cfg.needsTarget ? targets : undefined,
-        manual_selections: method === 'manual' && !manualUsesSectors ? manualSelections : undefined,
+        manual_selections: method === 'manual' && !manualUsesSectors
+          ? manualSelections.map((selection) => ({ ...selection, side: forcedSide || selection.side }))
+          : undefined,
         manual_sector_selections: method === 'manual' && manualUsesSectors ? manualSectorSelections : undefined,
         trade_date: tradeDate,
         settlement_date: settlementDate,
@@ -532,10 +549,16 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
       const generatedPlan = await api.createTradePlanStream(payload, {
         onProgress: (evt) => setProgressEvents((prev) => [...prev, evt]),
       })
+      // Let the bar visibly finish at 100% with every stage ticked, and hold
+      // there for a beat, before handing off to the plan — instead of
+      // swapping the instant the stream ends while the last stage still
+      // reads "active".
+      setFinishing(true)
+      await new Promise((resolve) => window.setTimeout(resolve, 2000))
       setPlan(generatedPlan)
     } catch (e) {
       setError(e.message)
-    } finally { setBusy(false) }
+    } finally { setBusy(false); setFinishing(false) }
   }
 
   function closePlan() {
@@ -698,9 +721,13 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
                 </Typography>
               </FormControl>
               {manualSelections.map((selection) => (
-                <Stack key={selection.ticker} direction="row" alignItems="center" justifyContent="space-between">
-                  <Typography variant="body2" fontWeight={600}>{selection.ticker}</Typography>
-                  <Stack direction="row" spacing={1} alignItems="center">
+                <Stack key={selection.ticker} direction="row" alignItems="flex-start" spacing={2}>
+                  <Box sx={{ height: 40, display: 'flex', alignItems: 'center', minWidth: 120, flexShrink: 0 }}>
+                    <Typography variant="body2" fontWeight={600} noWrap title={selection.ticker}>
+                      {selection.ticker}
+                    </Typography>
+                  </Box>
+                  <Stack direction="row" spacing={1} alignItems="flex-start">
                     <TextField size="small" type="number" label="₹ Cr" value={selection.amount_cr}
                       error={Number(selection.amount_cr) < 0}
                       helperText={Number(selection.amount_cr) < 0 ? 'Cannot be negative' : ' '}
@@ -711,17 +738,19 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
                           item.ticker === selection.ticker ? { ...item, amount_cr: e.target.value } : item))
                       }}
                       sx={{ width: 105 }} />
-                    {forcedSide ? (
-                      <Chip size="small" label={forcedSide}
-                        color={forcedSide === 'BUY' ? 'success' : 'error'} variant="outlined" />
-                    ) : (
-                      <ToggleButtonGroup exclusive size="small" value={selection.side}
-                        onChange={(_, side) => side && setManualSelections((current) => current.map((item) =>
-                          item.ticker === selection.ticker ? { ...item, side } : item))}>
-                        <ToggleButton value="BUY">BUY</ToggleButton>
-                        <ToggleButton value="SELL">SELL</ToggleButton>
-                      </ToggleButtonGroup>
-                    )}
+                    <Box sx={{ height: 40, display: 'flex', alignItems: 'center' }}>
+                      {forcedSide ? (
+                        <Chip size="small" label={forcedSide}
+                          color={forcedSide === 'BUY' ? 'success' : 'error'} variant="outlined" />
+                      ) : (
+                        <ToggleButtonGroup exclusive size="small" value={selection.side}
+                          onChange={(_, side) => side && setManualSelections((current) => current.map((item) =>
+                            item.ticker === selection.ticker ? { ...item, side } : item))}>
+                          <ToggleButton value="BUY">BUY</ToggleButton>
+                          <ToggleButton value="SELL">SELL</ToggleButton>
+                        </ToggleButtonGroup>
+                      )}
+                    </Box>
                   </Stack>
                 </Stack>
               ))}
@@ -823,18 +852,14 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
       {validationWarning && <Alert severity="warning">{validationWarning}</Alert>}
       {error && <Alert severity="error">{error} — is the backend running on :8000?</Alert>}
 
-      {busy && <PlanGenerationProgress events={progressEvents} />}
+      <Collapse in={busy} timeout={500} unmountOnExit>
+        <Box ref={progressRef}><PlanGenerationProgress events={progressEvents} done={finishing} /></Box>
+      </Collapse>
 
       {plan && (
         <Grow in timeout={450}>
           <Stack spacing={2.5}>
-            {s.redemption_shortfall_cr > 0 && (
-              <Alert severity="warning" variant="outlined">
-                <strong>Redemption not fully funded:</strong> requested {fmtCrValue(s.redemption_requested_cr)};
-                planned sell orders raise {fmtCrValue(s.redemption_planned_cr)};
-                shortfall {fmtCrValue(s.redemption_shortfall_cr)}.
-              </Alert>
-            )}
+            <GenerationStepsSummary events={progressEvents} />
             <Stack direction="row" justifyContent="flex-end" sx={{ mb: -1.5 }}>
               <Tooltip title="Close generated plan">
                 <IconButton size="small" onClick={closePlan} aria-label="Close generated plan">
@@ -842,6 +867,13 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
                 </IconButton>
               </Tooltip>
             </Stack>
+            {s.redemption_shortfall_cr > 0 && (
+              <Alert severity="warning" variant="outlined">
+                <strong>Redemption not fully funded:</strong> requested {fmtCrValue(s.redemption_requested_cr)};
+                planned sell orders raise {fmtCrValue(s.redemption_planned_cr)};
+                shortfall {fmtCrValue(s.redemption_shortfall_cr)}.
+              </Alert>
+            )}
             {/* Summary tiles — investable cash leads with an accent */}
             <KpiGrid min={190}>
               <Stat accent icon={<AccountBalanceWalletOutlinedIcon />} label="Investable Cash" value={fmtCrValue(toCr(s.investable_amount), 0)}
@@ -922,7 +954,6 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
               </Alert>
             )}
             <AdditionalPlanNotes warnings={plan.warnings || []} riskFlags={plan.risk_flags || []} />
-            <GenerationStepsSummary events={progressEvents} />
 
             {plan.risk_return && (
               <Panel icon={<ShowChartOutlinedIcon />} title="Risk & Return: Before vs After Plan">
