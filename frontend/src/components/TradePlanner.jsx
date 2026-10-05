@@ -738,19 +738,16 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
                           item.ticker === selection.ticker ? { ...item, amount_cr: e.target.value } : item))
                       }}
                       sx={{ width: 105 }} />
-                    <Box sx={{ height: 40, display: 'flex', alignItems: 'center' }}>
-                      {forcedSide ? (
-                        <Chip size="small" label={forcedSide}
-                          color={forcedSide === 'BUY' ? 'success' : 'error'} variant="outlined" />
-                      ) : (
+                    {!forcedSide && (
+                      <Box sx={{ height: 40, display: 'flex', alignItems: 'center' }}>
                         <ToggleButtonGroup exclusive size="small" value={selection.side}
                           onChange={(_, side) => side && setManualSelections((current) => current.map((item) =>
                             item.ticker === selection.ticker ? { ...item, side } : item))}>
                           <ToggleButton value="BUY">BUY</ToggleButton>
                           <ToggleButton value="SELL">SELL</ToggleButton>
                         </ToggleButtonGroup>
-                      )}
-                    </Box>
+                      </Box>
+                    )}
                   </Stack>
                 </Stack>
               ))}

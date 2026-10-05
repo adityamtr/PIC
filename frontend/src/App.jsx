@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  Alert, AppBar, Box, CircularProgress, Container, CssBaseline, Fade, IconButton, MenuItem, Select,
+  Alert, AppBar, Box, Chip, CircularProgress, Container, CssBaseline, Fade, IconButton, MenuItem, Select,
   Snackbar, Tab, Tabs, ThemeProvider, Toolbar, Tooltip, Typography,
 } from '@mui/material'
 import DarkModeIcon from '@mui/icons-material/DarkModeOutlined'
@@ -64,12 +64,25 @@ export default function App() {
         sx={{ borderBottom: 1, borderColor: 'divider', bgcolor: 'background.paper' }}>
         <Toolbar sx={{ gap: 1.25, flexWrap: { xs: 'wrap', sm: 'nowrap' },
           py: { xs: 1, sm: 0 }, minHeight: { xs: 'auto', sm: 64 } }}>
-          <Logo size={38} />
+          <Logo size={38} mode={mode} />
           <Box sx={{ lineHeight: 1.1 }}>
-            <Typography variant="h6" sx={{ fontWeight: 800, letterSpacing: 0.2, lineHeight: 1.2,
-              background: BRAND_GRADIENT, WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
-              PIC Tool
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+              <Typography variant="h6" sx={{ fontWeight: 800, letterSpacing: 0.2, lineHeight: 1.2,
+                background: BRAND_GRADIENT, WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+                PIC Tool
+              </Typography>
+              <Chip label="PRO" size="small" variant="outlined" sx={{
+                height: 18,
+                borderRadius: 1,
+                fontSize: '0.6rem',
+                fontWeight: 800,
+                letterSpacing: 0.5,
+                color: mode === 'dark' ? '#5A9DB7' : '#087F70',
+                borderColor: mode === 'dark' ? 'rgba(90,157,183,0.45)' : 'rgba(8,127,112,0.28)',
+                bgcolor: mode === 'dark' ? 'rgba(49,126,158,0.12)' : 'rgba(8,127,112,0.05)',
+                '& .MuiChip-label': { px: 0.75 },
+              }} />
+            </Box>
             <Typography variant="caption" color="text.secondary"
               sx={{ display: { xs: 'none', sm: 'block' }, letterSpacing: 0.6, textTransform: 'uppercase', fontWeight: 600 }}>
               Trade-Plan Workbench
