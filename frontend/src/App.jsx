@@ -1,12 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  Alert, AppBar, Box, Chip, CircularProgress, Container, CssBaseline, Fade, IconButton, MenuItem, Select,
+  Alert, AppBar, Box, CircularProgress, Container, CssBaseline, Fade, IconButton, MenuItem, Select,
   Snackbar, Tab, Tabs, ThemeProvider, Toolbar, Tooltip, Typography,
 } from '@mui/material'
 import DarkModeIcon from '@mui/icons-material/DarkModeOutlined'
 import LightModeIcon from '@mui/icons-material/LightModeOutlined'
 import RestartAltIcon from '@mui/icons-material/RestartAlt'
-import CircleIcon from '@mui/icons-material/Circle'
 import CandlestickChartOutlinedIcon from '@mui/icons-material/CandlestickChartOutlined'
 import AccountBalanceWalletOutlinedIcon from '@mui/icons-material/AccountBalanceWalletOutlined'
 import SwapHorizOutlinedIcon from '@mui/icons-material/SwapHorizOutlined'
@@ -23,7 +22,6 @@ export default function App() {
   const [mode, setMode] = useState(() => localStorage.getItem('pic-mode') || 'light')
   const [tab, setTab] = useState(0)
   const [focusedPlanId, setFocusedPlanId] = useState('')
-  const [apiUp, setApiUp] = useState(null)
   const [funds, setFunds] = useState([])
   const [fundId, setFundId] = useState('')
   const [resetting, setResetting] = useState(false)
@@ -33,7 +31,6 @@ export default function App() {
 
   useEffect(() => { localStorage.setItem('pic-mode', mode) }, [mode])
   useEffect(() => {
-    api.health().then(() => setApiUp(true)).catch(() => setApiUp(false))
     api.funds().then((d) => {
       setFunds(d.funds)
       setFundId((current) => current || d.default)
@@ -70,10 +67,8 @@ export default function App() {
           <Logo size={34} />
           <Typography variant="h6" sx={{ fontWeight: 800,
             background: BRAND_GRADIENT, WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
-            WealthVector
+            PIC Tool
           </Typography>
-          <Chip size="small" label="PIC middle layer" variant="outlined" color="primary"
-            sx={{ display: { xs: 'none', sm: 'inline-flex' } }} />
           <Box sx={{ flexGrow: { xs: 0, sm: 1 }, width: { xs: 0, sm: 'auto' } }} />
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0,
             width: { xs: '100%', sm: 'auto' }, flex: { sm: '0 0 auto' } }}>
@@ -94,10 +89,6 @@ export default function App() {
                 ))}
               </Select>
             )}
-            <Chip size="small" variant="outlined"
-              icon={<CircleIcon sx={{ fontSize: '0.7rem !important',
-                color: apiUp === true ? 'success.main' : apiUp === false ? 'error.main' : 'text.disabled' }} />}
-              label={apiUp === true ? 'API' : apiUp === false ? 'Offline' : '…'} />
             <Tooltip title={mode === 'light' ? 'Dark mode' : 'Light mode'}>
               <IconButton onClick={toggleMode} color="inherit">
                 {mode === 'light' ? <DarkModeIcon /> : <LightModeIcon />}

@@ -5,7 +5,7 @@
 export function Logo({ size = 36, rounded = 12 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 40 40" fill="none"
-      xmlns="http://www.w3.org/2000/svg" role="img" aria-label="WealthVector">
+      xmlns="http://www.w3.org/2000/svg" role="img" aria-label="PIC Tool">
       <defs>
         <linearGradient id="wv-grad" x1="4" y1="2" x2="36" y2="38" gradientUnits="userSpaceOnUse">
           <stop stopColor="#6366F1" />

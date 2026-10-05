@@ -1,8 +1,11 @@
 import { useEffect, useState } from 'react'
-import { Box, CircularProgress, Fade, LinearProgress, Stack, Typography } from '@mui/material'
+import {
+  Accordion, AccordionDetails, AccordionSummary, Box, CircularProgress, Fade, LinearProgress, Stack, Typography,
+} from '@mui/material'
 import AccountBalanceWalletOutlinedIcon from '@mui/icons-material/AccountBalanceWalletOutlined'
 import AutoGraphOutlinedIcon from '@mui/icons-material/AutoGraphOutlined'
 import CheckIcon from '@mui/icons-material/Check'
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import FactCheckOutlinedIcon from '@mui/icons-material/FactCheckOutlined'
 import ShieldOutlinedIcon from '@mui/icons-material/ShieldOutlined'
 import { Panel } from './ui'
@@ -145,6 +148,58 @@ export default function PlanGenerationProgress({ events = [] }) {
           })}
         </Stack>
       </Box>
+    </Panel>
+  )
+}
+
+// Read-only recap of the same granular steps, shown collapsed inside the
+// finished plan so the user can see exactly which checks/rules ran without
+// re-triggering generation. `events` is the same array PlanGenerationProgress
+// was fed while loading.
+export function GenerationStepsSummary({ events = [] }) {
+  if (!events.length) return null
+
+  const stepsByPhase = new Map()
+  for (const e of events) {
+    if (!stepsByPhase.has(e.phase)) stepsByPhase.set(e.phase, [])
+    stepsByPhase.get(e.phase).push(e)
+  }
+  const stepCount = events.filter((e) => e.step).length
+
+  return (
+    <Panel icon={<FactCheckOutlinedIcon />} title="How this plan was generated" bodySx={{ pb: 0 }}>
+      <Accordion disableGutters elevation={0} sx={{
+        bgcolor: 'transparent', mt: -1,
+        '&:before': { display: 'none' },
+      }}>
+        <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={{ px: 0, minHeight: 40,
+          '& .MuiAccordionSummary-content': { my: 1 } }}>
+          <Typography variant="body2" color="text.secondary">
+            {stepCount} check{stepCount === 1 ? '' : 's'} across {STAGES.length} stages — view the detail
+          </Typography>
+        </AccordionSummary>
+        <AccordionDetails sx={{ px: 0, pt: 0, pb: 1.5 }}>
+          <Stack spacing={0}>
+            {STAGES.map((stage) => {
+              const steps = stepsByPhase.get(stage.phase) || []
+              if (!steps.length) return null
+              const Icon = stage.icon
+              return (
+                <Stack key={stage.phase} direction="row" spacing={1.5} alignItems="flex-start" sx={{ py: 1.25 }}>
+                  <Box sx={{ width: 28, height: 28, borderRadius: '50%', display: 'grid', placeItems: 'center',
+                    flexShrink: 0, bgcolor: 'action.selected', color: 'primary.main', border: 1, borderColor: 'primary.main' }}>
+                    <Icon fontSize="small" />
+                  </Box>
+                  <Box sx={{ minWidth: 0, pt: 0.25, flex: 1 }}>
+                    <Typography variant="body2" fontWeight={700}>{stage.title}</Typography>
+                    {steps.map((s) => <StepLine key={s.step} label={s.label} detail={s.detail} />)}
+                  </Box>
+                </Stack>
+              )
+            })}
+          </Stack>
+        </AccordionDetails>
+      </Accordion>
     </Panel>
   )
 }

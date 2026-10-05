@@ -18,11 +18,22 @@ const FIELD_LABELS = {
   settlement_date: 'Settlement date', target_volatility: 'Risk target',
 }
 
-const PRE_PLAN_PROMPTS = [
-  'Create a contribution plan for ₹250 Cr using the optimizer.',
-  'Increase Information Technology by ₹50 Cr and create a plan.',
-  'Rebalance this fund using rules-based allocation.',
-]
+const MAX_SUGGESTIONS = 3
+
+// Fund-aware so the suggestions read as real, clickable actions (e.g. "Redeem
+// ₹10 Cr from Kotak Large & Midcap Fund") instead of generic placeholders.
+// Capped at MAX_SUGGESTIONS so the row stays short and scannable.
+function buildPrePlanPrompts(funds, fundId) {
+  const current = funds.find((fund) => fund.fund_id === fundId) || funds[0]
+  const other = funds.find((fund) => fund.fund_id !== current?.fund_id)
+  const prompts = []
+  if (current) prompts.push(`Redeem ₹10 Cr from ${current.name}`)
+  prompts.push('Build me a plan to invest ₹250 Cr, optimized automatically')
+  prompts.push(other
+    ? `Switch to ${other.name} and rebalance it for me`
+    : 'Rebalance this fund for me using the standard rules')
+  return prompts.slice(0, MAX_SUGGESTIONS)
+}
 
 function displayValue(key, value, funds) {
   if (key === 'fund_id') return funds.find((fund) => fund.fund_id === value)?.name || value
@@ -127,11 +138,11 @@ export default function PlannerAssistant({
 
   const quickPrompts = plan?.plan_id
     ? [
-      'Explain the plan',
-      'Which orders have the largest values?',
-      ...(hasPlanIssues(plan) ? ['Describe the compliance and policy issues'] : []),
+      'Can you explain this plan in simple terms?',
+      'Which orders are the biggest?',
+      ...(hasPlanIssues(plan) ? ["What's wrong with compliance or policy here?"] : []),
     ]
-    : PRE_PLAN_PROMPTS
+    : buildPrePlanPrompts(funds, fundId)
 
   function clearChat() {
     setMessages([])
@@ -152,7 +163,8 @@ export default function PlannerAssistant({
       gridArea: 'assistant',
     })}>
       <Box sx={{ px: 2, py: 1.5, bgcolor: 'background.paper' }}>
-        <Stack direction="row" spacing={1} alignItems="center">
+        <Stack direction="row" spacing={1} alignItems="center"
+          sx={fullPage ? { maxWidth: 820, mx: 'auto', width: '100%' } : undefined}>
           <AutoAwesomeOutlinedIcon fontSize="small" color="secondary" />
           <Box sx={{ minWidth: 0, flex: 1 }}>
             <Typography variant="subtitle1" fontWeight={750}>Planner assistant</Typography>
@@ -161,27 +173,32 @@ export default function PlannerAssistant({
             </Typography>
           </Box>
           {plan?.plan_id && <Chip size="small" variant="outlined" label="Read only" />}
-          <Tooltip title="Clear chat">
-            <span>
-              <IconButton aria-label="Clear chat" size="small" onClick={clearChat}
-                disabled={sending || (!messages.length && !error && !input)}>
-                <ClearAllOutlinedIcon fontSize="small" />
-              </IconButton>
-            </span>
-          </Tooltip>
-          <Tooltip title={fullPage ? 'Return to side chat' : 'Expand chat to full page'}>
-            <IconButton aria-label={fullPage ? 'Return to side chat' : 'Expand chat to full page'} size="small"
-              onClick={() => setFullPage((current) => !current)}>
-              {fullPage
-                ? <CloseFullscreenOutlinedIcon fontSize="small" />
-                : <OpenInFullOutlinedIcon fontSize="small" />}
-            </IconButton>
-          </Tooltip>
+          <Stack direction="row" spacing={0.5} alignItems="center">
+            <Tooltip title="Clear chat">
+              <Box component="span" sx={{ display: 'inline-flex' }}>
+                <IconButton aria-label="Clear chat" size="small" onClick={clearChat}
+                  disabled={sending || (!messages.length && !error && !input)}>
+                  <ClearAllOutlinedIcon fontSize="small" />
+                </IconButton>
+              </Box>
+            </Tooltip>
+            <Tooltip title={fullPage ? 'Return to side chat' : 'Expand chat to full page'}>
+              <Box component="span" sx={{ display: 'inline-flex' }}>
+                <IconButton aria-label={fullPage ? 'Return to side chat' : 'Expand chat to full page'} size="small"
+                  onClick={() => setFullPage((current) => !current)}>
+                  {fullPage
+                    ? <CloseFullscreenOutlinedIcon fontSize="small" />
+                    : <OpenInFullOutlinedIcon fontSize="small" />}
+                </IconButton>
+              </Box>
+            </Tooltip>
+          </Stack>
         </Stack>
       </Box>
 
       <Divider />
       <Box sx={{ flex: 1, minHeight: 0, overflowY: 'auto', px: 1.5, py: 1.5 }}>
+        <Box sx={fullPage ? { maxWidth: 820, mx: 'auto' } : undefined}>
         {messages.length === 0 && (
           <Box sx={{ px: 0.5, py: 1 }}>
             <Typography variant="body2" color="text.secondary">
@@ -259,16 +276,22 @@ export default function PlannerAssistant({
           )}
           <div ref={endRef} />
         </Stack>
+        </Box>
       </Box>
 
-      {error && <Alert severity="error" sx={{ mx: 1.5, mb: 1 }}>{error}</Alert>}
+      {error && (
+        <Box sx={fullPage ? { maxWidth: 820, mx: 'auto', width: '100%' } : undefined}>
+          <Alert severity="error" sx={{ mx: 1.5, mb: 1 }}>{error}</Alert>
+        </Box>
+      )}
 
       <Box sx={{ px: 1.5, pb: 1 }}>
-        <Stack spacing={0.5} sx={{ mb: 1 }}>
+        <Box sx={fullPage ? { maxWidth: 820, mx: 'auto' } : undefined}>
+        <Stack direction="row" alignItems="flex-start" sx={{ mb: 1, flexWrap: 'wrap', gap: 0.75 }}>
           {quickPrompts.map((prompt) => (
             <Chip key={prompt} size="small" label={prompt} variant="outlined"
-              sx={{ height: 'auto', width: '100%', justifyContent: 'flex-start',
-                '& .MuiChip-label': { display: 'block', whiteSpace: 'normal', py: 0.5, textAlign: 'left' } }}
+              sx={{ height: 'auto', maxWidth: '100%',
+                '& .MuiChip-label': { display: 'block', whiteSpace: 'normal', py: 0.65, lineHeight: 1.3, textAlign: 'left' } }}
               disabled={sending || busy} onClick={() => submit(prompt)} />
           ))}
         </Stack>
@@ -292,6 +315,7 @@ export default function PlannerAssistant({
             </span>
           </Tooltip>
         </Stack>
+        </Box>
       </Box>
 
       <Dialog open={Boolean(confirmation)} onClose={() => setConfirmation(null)} maxWidth="xs" fullWidth>

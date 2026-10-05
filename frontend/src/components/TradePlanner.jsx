@@ -33,7 +33,7 @@ import PlayArrowOutlinedIcon from '@mui/icons-material/PlayArrowOutlined'
 import { api } from '../api'
 import { fmtCrValue, fmtNum, fmtPct, fmtRupee } from '../format'
 import { KpiGrid, Panel, ScrollX, Stat } from './ui'
-import PlanGenerationProgress from './PlanGenerationProgress'
+import PlanGenerationProgress, { GenerationStepsSummary } from './PlanGenerationProgress'
 import RiskReturnPanel from './RiskReturnPanel'
 import RiskReturnComparison from './RiskReturnComparison'
 import PlannerAssistant from './PlannerAssistant'
@@ -404,6 +404,9 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
 
   const cfg = ACTIONS.find((a) => a.key === action)
   const manualUsesSectors = method === 'manual' && cfg.needsTarget
+  // Contribution only deploys cash (BUY); redemption only raises it (SELL).
+  // Rebalance can go either way, so it keeps the BUY/SELL choice.
+  const forcedSide = action === 'contribution' ? 'BUY' : action === 'redemption' ? 'SELL' : null
   const hasExplicitManualAmounts = method === 'manual' && (
     manualUsesSectors ? manualSectorSelections.length > 0 : manualSelections.length > 0
   )
@@ -441,6 +444,16 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
     if (valid.length === 0 && options.length) setTargets([options[0]])
     else if (valid.length !== targets.length) setTargets(valid)
   }, [action, fundSectors, method, universe, holdings, manualUsesSectors]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Contribution/redemption lock manual security picks to BUY/SELL respectively —
+  // flip any picks made before the action changed so they stay consistent.
+  useEffect(() => {
+    if (!forcedSide) return
+    setManualSelections((current) => {
+      if (current.every((item) => item.side === forcedSide)) return current
+      return current.map((item) => ({ ...item, side: forcedSide }))
+    })
+  }, [forcedSide])
 
   function applyPreset(p) {
     setAction(p.action)
@@ -558,7 +571,10 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
       })),
   ]
   const activePhaseIndex = progressEvents.length ? progressEvents[progressEvents.length - 1].index : 0
-  const activeStep = plan ? 4 : busy ? Math.min(4, activePhaseIndex) : 0
+  // MUI Stepper marks steps with index < activeStep as complete, so once the
+  // plan is ready every stage (including "PIC Review") should tick, not just
+  // the first four — hence STEPS.length rather than the last index (4).
+  const activeStep = plan ? STEPS.length : busy ? Math.min(4, activePhaseIndex) : 0
   const orderTickers = new Set((plan?.orders || []).map((o) => o.ticker))
   const opt = plan?.optimization
 
@@ -660,7 +676,7 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
                   const tickers = e.target.value
                   setManualSelections(tickers.map((ticker) => ({
                     ticker,
-                    side: manualSelections.find((s) => s.ticker === ticker)?.side || 'BUY',
+                    side: manualSelections.find((s) => s.ticker === ticker)?.side || forcedSide || 'BUY',
                     amount_cr: manualSelections.find((s) => s.ticker === ticker)?.amount_cr || 0,
                   })))
                 }}
@@ -676,7 +692,9 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
                 ))}
                 </Select>
                 <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
-                  Select securities, then choose BUY or SELL for each.
+                  {forcedSide
+                    ? `Select securities and enter an amount — every pick is a ${forcedSide === 'BUY' ? 'buy' : 'sell'} for ${cfg.label.toLowerCase()}.`
+                    : 'Select securities, then choose BUY or SELL for each.'}
                 </Typography>
               </FormControl>
               {manualSelections.map((selection) => (
@@ -693,12 +711,17 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
                           item.ticker === selection.ticker ? { ...item, amount_cr: e.target.value } : item))
                       }}
                       sx={{ width: 105 }} />
-                    <ToggleButtonGroup exclusive size="small" value={selection.side}
-                      onChange={(_, side) => side && setManualSelections((current) => current.map((item) =>
-                        item.ticker === selection.ticker ? { ...item, side } : item))}>
-                      <ToggleButton value="BUY">BUY</ToggleButton>
-                      <ToggleButton value="SELL">SELL</ToggleButton>
-                    </ToggleButtonGroup>
+                    {forcedSide ? (
+                      <Chip size="small" label={forcedSide}
+                        color={forcedSide === 'BUY' ? 'success' : 'error'} variant="outlined" />
+                    ) : (
+                      <ToggleButtonGroup exclusive size="small" value={selection.side}
+                        onChange={(_, side) => side && setManualSelections((current) => current.map((item) =>
+                          item.ticker === selection.ticker ? { ...item, side } : item))}>
+                        <ToggleButton value="BUY">BUY</ToggleButton>
+                        <ToggleButton value="SELL">SELL</ToggleButton>
+                      </ToggleButtonGroup>
+                    )}
                   </Stack>
                 </Stack>
               ))}
@@ -899,6 +922,7 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
               </Alert>
             )}
             <AdditionalPlanNotes warnings={plan.warnings || []} riskFlags={plan.risk_flags || []} />
+            <GenerationStepsSummary events={progressEvents} />
 
             {plan.risk_return && (
               <Panel icon={<ShowChartOutlinedIcon />} title="Risk & Return: Before vs After Plan">
