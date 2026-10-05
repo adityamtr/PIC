@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import {
   Accordion, AccordionDetails, AccordionSummary, Alert, Box, Button, Checkbox, Chip, CircularProgress, Collapse, Divider, Grow,
   FormControl, IconButton, InputLabel, ListItemText, MenuItem, Select, Stack, Step, StepLabel,
-  Stepper, Table, TableBody, TableCell, TableHead, TableRow, TextField,
+  Snackbar, Stepper, Table, TableBody, TableCell, TableHead, TableRow, TextField,
   ToggleButton, ToggleButtonGroup, Tooltip,
   Typography,
 } from '@mui/material'
@@ -39,7 +39,8 @@ import RiskReturnComparison from './RiskReturnComparison'
 import PlannerAssistant from './PlannerAssistant'
 
 const toCr = (r) => r / 1e7
-const STEPS = ['PM Intent', 'Cash-Flow Planning', 'Trade Plan', 'Compliance & Risk', 'PIC Review']
+const COLLAPSE_MS = 500
+const STEPS =['PM Intent', 'Cash-Flow Planning', 'Trade Plan', 'Compliance & Risk', 'PIC Review']
 const MAX_SETTLEMENT_DAYS = 33
 const dateString = (date) => {
   const year = date.getFullYear()
@@ -399,7 +400,9 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
   const [universe, setUniverse] = useState([])
   const [holdings, setHoldings] = useState([])
   const [assistantHighlight, setAssistantHighlight] = useState('')
+  const [planToast, setPlanToast] = useState(false)
   const progressRef = useRef(null)
+  const planRef = useRef(null)
   const today = dateOffset(0)
   const latestTradeDate = dateMonthOffset(1)
   const securityOptions = [...universe, ...holdings.filter((h) => !universe.some((u) => u.ticker === h.ticker))]
@@ -435,6 +438,29 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
     const settleTimer = window.setTimeout(scroll, 550)
     return () => { cancelAnimationFrame(raf); window.clearTimeout(settleTimer) }
   }, [busy])
+
+  // Keep following the panel as new progress steps stream in, so the latest
+  // step stays visible until generation finishes.
+  useEffect(() => {
+    if (!busy || progressEvents.length === 0) return
+    const raf = requestAnimationFrame(() => {
+      progressRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [busy, progressEvents.length])
+
+  // Once the progress panel has collapsed and the plan mounts, start at the
+  // top of the plan, and flash a brief toast instead of posting to the chat.
+  useEffect(() => {
+    if (!plan?.plan_id) return
+    setPlanToast(true)
+    // Wait out the plan's 450ms Grow so its scale transform doesn't skew the
+    // measured position; the plan starts with the "How this plan was generated" panel.
+    const timer = window.setTimeout(() => {
+      planRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 480)
+    return () => window.clearTimeout(timer)
+  }, [plan?.plan_id])
 
   // On fund change: clear any plan and load the fund's sectors for the dropdown.
   useEffect(() => {
@@ -555,6 +581,11 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
       // reads "active".
       setFinishing(true)
       await new Promise((resolve) => window.setTimeout(resolve, 2000))
+      // Collapse the progress panel first (keeping its "ready" state while it
+      // closes), and only then reveal the plan so the two don't shift the page
+      // at the same time.
+      setBusy(false)
+      await new Promise((resolve) => window.setTimeout(resolve, COLLAPSE_MS))
       setPlan(generatedPlan)
     } catch (e) {
       setError(e.message)
@@ -846,16 +877,21 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
         </Stack>
       </Panel>
 
+      <Snackbar open={planToast} autoHideDuration={4000} onClose={(_, reason) => { if (reason !== 'clickaway') setPlanToast(false) }}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}>
+        <Alert severity="success" variant="filled" onClose={() => setPlanToast(false)}>Plan generated and ready for review</Alert>
+      </Snackbar>
+
       {validationWarning && <Alert severity="warning">{validationWarning}</Alert>}
       {error && <Alert severity="error">{error} — is the backend running on :8000?</Alert>}
 
-      <Collapse in={busy} timeout={500} unmountOnExit>
+      <Collapse in={busy} timeout={COLLAPSE_MS} unmountOnExit>
         <Box ref={progressRef}><PlanGenerationProgress events={progressEvents} done={finishing} /></Box>
       </Collapse>
 
       {plan && (
         <Grow in timeout={450}>
-          <Stack spacing={2.5}>
+          <Stack spacing={2.5} ref={planRef} sx={{ scrollMarginTop: 88 }}>
             <GenerationStepsSummary events={progressEvents} />
             <Stack direction="row" sx={{ width: '100%', mb: -1.5 }}>
               <Tooltip title="Close generated plan">

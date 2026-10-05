@@ -21,22 +21,12 @@ const FIELD_LABELS = {
 }
 
 const MAX_SUGGESTIONS = 2
-const SESSION_KEY = 'pic-assistant-chat-session'
 const ARCHIVE_KEY = 'pic-assistant-chat-archive'
 const MAX_ARCHIVED_SESSIONS = 20
 
-function loadSession() {
-  try {
-    const raw = window.sessionStorage.getItem(SESSION_KEY)
-    return raw ? JSON.parse(raw) : null
-  } catch {
-    return null
-  }
-}
-
-// Past conversations survive "Clear chat" (and the browser tab closing) so
-// the user can come back and reopen one later — kept in localStorage rather
-// than the per-tab sessionStorage used for the live conversation.
+// Past conversations survive "Clear chat" so the user can
+// come back and reopen one later — kept in localStorage. The live conversation
+// itself is not persisted and starts empty on every page load.
 function loadArchive() {
   try {
     const raw = window.localStorage.getItem(ARCHIVE_KEY)
@@ -96,43 +86,21 @@ function displayValue(key, value, funds) {
 export default function PlannerAssistant({
   fundId, funds, draft, sectors, securities, plan, onApplyUpdates, onGeneratePlan, busy,
 }) {
-  const [messages, setMessages] = useState(() => loadSession()?.messages || [])
+  const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
   const [error, setError] = useState('')
   const [confirmation, setConfirmation] = useState(null)
   const [generating, setGenerating] = useState(false)
   const [fullPage, setFullPage] = useState(false)
-  const [suggestedPrompts, setSuggestedPrompts] = useState(() => loadSession()?.suggestedPrompts || [])
+  const [suggestedPrompts, setSuggestedPrompts] = useState([])
   const [pastSessions, setPastSessions] = useState(() => loadArchive())
   const [sessionsAnchor, setSessionsAnchor] = useState(null)
   const endRef = useRef(null)
-  const previousPlanId = useRef(null)
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
   }, [messages, sending])
-
-  // Persist the conversation for the lifetime of the browser tab, so a reload
-  // recalls prior messages — only "Clear chat" actually resets it.
-  useEffect(() => {
-    try {
-      window.sessionStorage.setItem(SESSION_KEY, JSON.stringify({ messages, suggestedPrompts }))
-    } catch {
-      // sessionStorage unavailable (private mode, quota) — chat still works in-memory.
-    }
-  }, [messages, suggestedPrompts])
-
-  useEffect(() => {
-    const nextPlanId = plan?.plan_id || null
-    if (nextPlanId && nextPlanId !== previousPlanId.current) {
-      setMessages((current) => [...current, {
-        id: `${Date.now()}-plan`, role: 'assistant',
-        content: 'The plan is ready for review. I can explain the summary, inspect policy and compliance findings, or look up specific orders. I cannot modify or approve it.',
-      }])
-    }
-    previousPlanId.current = nextPlanId
-  }, [plan?.plan_id])
 
   const addMessage = (message) => setMessages((current) => [...current, {
     id: `${Date.now()}-${Math.random()}`, ...message,
@@ -213,7 +181,6 @@ export default function PlannerAssistant({
     setError('')
     setConfirmation(null)
     setSuggestedPrompts([])
-    try { window.sessionStorage.removeItem(SESSION_KEY) } catch { /* ignore */ }
   }
 
   function openPastSession(session) {
@@ -260,7 +227,7 @@ export default function PlannerAssistant({
           <Stack direction="row" spacing={0.5} alignItems="center">
             <Tooltip title="Previous chat sessions">
               <Box component="span" sx={{ display: 'inline-flex' }}>
-                <IconButton aria-label="Previous chat sessions" size="small"
+                <IconButton aria-label="Previous chat sessions" size="small" sx={{ width: 32, height: 32, p: 0, borderRadius: '50%', boxShadow: 'none' }}
                   onClick={(event) => setSessionsAnchor(event.currentTarget)}>
                   <HistoryOutlinedIcon fontSize="small" />
                 </IconButton>
@@ -290,7 +257,7 @@ export default function PlannerAssistant({
             </Menu>
             <Tooltip title="Clear chat">
               <Box component="span" sx={{ display: 'inline-flex' }}>
-                <IconButton aria-label="Clear chat" size="small" onClick={clearChat}
+                <IconButton aria-label="Clear chat" size="small" sx={{ width: 32, height: 32, p: 0, borderRadius: '50%', boxShadow: 'none' }} onClick={clearChat}
                   disabled={sending || (!messages.length && !error && !input)}>
                   <ClearAllOutlinedIcon fontSize="small" />
                 </IconButton>
@@ -298,7 +265,7 @@ export default function PlannerAssistant({
             </Tooltip>
             <Tooltip title={fullPage ? 'Return to side chat' : 'Expand chat to full page'}>
               <Box component="span" sx={{ display: 'inline-flex' }}>
-                <IconButton aria-label={fullPage ? 'Return to side chat' : 'Expand chat to full page'} size="small"
+                <IconButton aria-label={fullPage ? 'Return to side chat' : 'Expand chat to full page'} size="small" sx={{ width: 32, height: 32, p: 0, borderRadius: '50%', boxShadow: 'none' }}
                   onClick={() => setFullPage((current) => !current)}>
                   {fullPage
                     ? <CloseFullscreenOutlinedIcon fontSize="small" />
@@ -360,7 +327,7 @@ export default function PlannerAssistant({
                 {item.updates && Object.keys(item.updates).length > 0 && (
                   <Stack direction="row" spacing={0.5} sx={{ mt: 1, flexWrap: 'wrap', gap: 0.5 }}>
                     {Object.entries(item.updates).map(([key, value]) => (
-                      <Chip key={key} size="small" variant="outlined"
+                      <Chip key={key} size="small" variant="outlined" sx={{ borderRadius: 1.5, boxShadow: 'none' }}
                         label={`${FIELD_LABELS[key] || key}: ${displayValue(key, value, funds)}`} />
                     ))}
                   </Stack>
@@ -406,7 +373,7 @@ export default function PlannerAssistant({
             <Stack direction="row" alignItems="flex-start" sx={{ flexWrap: 'wrap', gap: 0.75 }}>
               {displayedPrompts.map((prompt) => (
                 <Chip key={prompt} size="small" label={prompt} variant="outlined"
-                  sx={{ height: 'auto', maxWidth: '100%',
+                  sx={{ height: 'auto', maxWidth: '100%', borderRadius: 1.5, boxShadow: 'none',
                     '& .MuiChip-label': { display: 'block', whiteSpace: 'normal', py: 0.65, lineHeight: 1.3, textAlign: 'left' } }}
                   disabled={sending || busy} onClick={() => submit(prompt)} />
               ))}
