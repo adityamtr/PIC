@@ -6,7 +6,6 @@ import {
 import DarkModeIcon from '@mui/icons-material/DarkModeOutlined'
 import LightModeIcon from '@mui/icons-material/LightModeOutlined'
 import RestartAltIcon from '@mui/icons-material/RestartAlt'
-import CircleIcon from '@mui/icons-material/Circle'
 import CandlestickChartOutlinedIcon from '@mui/icons-material/CandlestickChartOutlined'
 import AccountBalanceWalletOutlinedIcon from '@mui/icons-material/AccountBalanceWalletOutlined'
 import SwapHorizOutlinedIcon from '@mui/icons-material/SwapHorizOutlined'
@@ -23,7 +22,6 @@ export default function App() {
   const [mode, setMode] = useState(() => localStorage.getItem('pic-mode') || 'light')
   const [tab, setTab] = useState(0)
   const [focusedPlanId, setFocusedPlanId] = useState('')
-  const [apiUp, setApiUp] = useState(null)
   const [funds, setFunds] = useState([])
   const [fundId, setFundId] = useState('')
   const [resetting, setResetting] = useState(false)
@@ -33,7 +31,6 @@ export default function App() {
 
   useEffect(() => { localStorage.setItem('pic-mode', mode) }, [mode])
   useEffect(() => {
-    api.health().then(() => setApiUp(true)).catch(() => setApiUp(false))
     api.funds().then((d) => {
       setFunds(d.funds)
       setFundId((current) => current || d.default)
@@ -67,13 +64,30 @@ export default function App() {
         sx={{ borderBottom: 1, borderColor: 'divider', bgcolor: 'background.paper' }}>
         <Toolbar sx={{ gap: 1.25, flexWrap: { xs: 'wrap', sm: 'nowrap' },
           py: { xs: 1, sm: 0 }, minHeight: { xs: 'auto', sm: 64 } }}>
-          <Logo size={34} />
-          <Typography variant="h6" sx={{ fontWeight: 800,
-            background: BRAND_GRADIENT, WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
-            WealthVector
-          </Typography>
-          <Chip size="small" label="PIC middle layer" variant="outlined" color="primary"
-            sx={{ display: { xs: 'none', sm: 'inline-flex' } }} />
+          <Logo size={38} mode={mode} />
+          <Box sx={{ lineHeight: 1.1 }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+              <Typography variant="h6" sx={{ fontWeight: 800, letterSpacing: 0.2, lineHeight: 1.2,
+                background: BRAND_GRADIENT, WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+                PIC Tool
+              </Typography>
+              <Chip label="PRO" size="small" variant="outlined" sx={{
+                height: 18,
+                borderRadius: 1,
+                fontSize: '0.6rem',
+                fontWeight: 800,
+                letterSpacing: 0.5,
+                color: mode === 'dark' ? '#5A9DB7' : '#087F70',
+                borderColor: mode === 'dark' ? 'rgba(90,157,183,0.45)' : 'rgba(8,127,112,0.28)',
+                bgcolor: mode === 'dark' ? 'rgba(49,126,158,0.12)' : 'rgba(8,127,112,0.05)',
+                '& .MuiChip-label': { px: 0.75 },
+              }} />
+            </Box>
+            <Typography variant="caption" color="text.secondary"
+              sx={{ display: { xs: 'none', sm: 'block' }, letterSpacing: 0.6, textTransform: 'uppercase', fontWeight: 600 }}>
+              Trade-Plan Workbench
+            </Typography>
+          </Box>
           <Box sx={{ flexGrow: { xs: 0, sm: 1 }, width: { xs: 0, sm: 'auto' } }} />
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0,
             width: { xs: '100%', sm: 'auto' }, flex: { sm: '0 0 auto' } }}>
@@ -94,10 +108,6 @@ export default function App() {
                 ))}
               </Select>
             )}
-            <Chip size="small" variant="outlined"
-              icon={<CircleIcon sx={{ fontSize: '0.7rem !important',
-                color: apiUp === true ? 'success.main' : apiUp === false ? 'error.main' : 'text.disabled' }} />}
-              label={apiUp === true ? 'API' : apiUp === false ? 'Offline' : '…'} />
             <Tooltip title={mode === 'light' ? 'Dark mode' : 'Light mode'}>
               <IconButton onClick={toggleMode} color="inherit">
                 {mode === 'light' ? <DarkModeIcon /> : <LightModeIcon />}

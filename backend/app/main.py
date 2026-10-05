@@ -288,10 +288,11 @@ def create_trade_plan(req: IntentRequest, fund_id: str | None = Query(None)):
 
 
 # Each granular step is real backend work, but generation is sub-second, so we
-# linger on every emitted step for a randomised 1-3s. This keeps each real
-# output readable and gives the stream a natural, non-mechanical cadence.
-_STEP_DWELL_MIN_SECONDS = 0.0
-_STEP_DWELL_MAX_SECONDS = 0.1
+# linger on every emitted step for a randomised beat. This keeps each real
+# output readable and gives the stream a natural, non-mechanical cadence —
+# tuned so the full ~17-step stream runs roughly 8-10s end to end.
+_STEP_DWELL_MIN_SECONDS = 0.45
+_STEP_DWELL_MAX_SECONDS = 0.6
 
 
 @app.post("/api/trade-plan/stream")
@@ -378,6 +379,7 @@ def interpret_trade_intent(req: AssistantInterpretRequest):
             funds,
             sorted(sectors),
             sorted(securities),
+            [item.model_dump() for item in req.history],
         )
     except assistant.AssistantConfigurationError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
