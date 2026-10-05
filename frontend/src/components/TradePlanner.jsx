@@ -404,10 +404,12 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
 
   const cfg = ACTIONS.find((a) => a.key === action)
   const manualUsesSectors = method === 'manual' && cfg.needsTarget
+  const manualOrderSide = action === 'contribution' ? 'BUY'
+    : action === 'redemption' ? 'SELL' : null
   const hasExplicitManualAmounts = method === 'manual' && (
     manualUsesSectors ? manualSectorSelections.length > 0 : manualSelections.length > 0
   )
-  const needsTopLevelAmount = cfg.needsAmount && (
+  const needsTopLevelAmount = cfg.needsAmount && !(action === 'contribution' && method === 'manual') && (
     action === 'contribution' || !hasExplicitManualAmounts
   )
   // Increase can target any buyable sector; Reduce only sectors the fund holds.
@@ -507,7 +509,12 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
         action,
         amount_cr: needsTopLevelAmount ? Number(amount) : undefined,
         targets: cfg.needsTarget ? targets : undefined,
-        manual_selections: method === 'manual' && !manualUsesSectors ? manualSelections : undefined,
+        manual_selections: method === 'manual' && !manualUsesSectors
+          ? manualSelections.map((selection) => ({
+            ...selection,
+            side: manualOrderSide || selection.side,
+          }))
+          : undefined,
         manual_sector_selections: method === 'manual' && manualUsesSectors ? manualSectorSelections : undefined,
         trade_date: tradeDate,
         settlement_date: settlementDate,
@@ -651,7 +658,7 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
           gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 220px), 1fr))',
           '& > *': { width: '100%', minWidth: 0 } }}>
           {method === 'manual' && !manualUsesSectors ? (
-            <Stack spacing={1} sx={{ gridColumn: '1 / -1' }}>
+            <Stack spacing={0.5} sx={{ gridColumn: '1 / -1' }}>
               <FormControl size="small" sx={{ width: '100%' }}>
                 <InputLabel id="manual-securities-label">Securities</InputLabel>
                 <Select labelId="manual-securities-label" label="Securities" multiple
@@ -660,7 +667,7 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
                   const tickers = e.target.value
                   setManualSelections(tickers.map((ticker) => ({
                     ticker,
-                    side: manualSelections.find((s) => s.ticker === ticker)?.side || 'BUY',
+                    side: manualOrderSide || manualSelections.find((s) => s.ticker === ticker)?.side || 'BUY',
                     amount_cr: manualSelections.find((s) => s.ticker === ticker)?.amount_cr || 0,
                   })))
                 }}
@@ -676,29 +683,49 @@ export default function TradePlanner({ fundId, funds, onChangeFundId, onContinue
                 ))}
                 </Select>
                 <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
-                  Select securities, then choose BUY or SELL for each.
+                  {action === 'contribution'
+                    ? 'Choose securities and enter an amount to buy for each.'
+                    : action === 'redemption'
+                      ? 'Choose securities to sell and enter an amount for each.'
+                      : 'Choose securities, then choose BUY or SELL for each.'}
                 </Typography>
               </FormControl>
               {manualSelections.map((selection) => (
-                <Stack key={selection.ticker} direction="row" alignItems="center" justifyContent="space-between">
+                <Stack key={selection.ticker} spacing={0} alignItems="center"
+                  sx={{
+                    width: { xs: '100%', sm: '60%' },
+                    minWidth: 0,
+                    py: 0.5,
+                    display: 'grid',
+                    gridTemplateColumns: 'minmax(0, 1fr) auto',
+                    columnGap: 2,
+                  }}>
                   <Typography variant="body2" fontWeight={600}>{selection.ticker}</Typography>
-                  <Stack direction="row" spacing={1} alignItems="center">
+                  <Stack direction="row" spacing={1.5} alignItems="center">
                     <TextField size="small" type="number" label="₹ Cr" value={selection.amount_cr}
                       error={Number(selection.amount_cr) < 0}
-                      helperText={Number(selection.amount_cr) < 0 ? 'Cannot be negative' : ' '}
+                      helperText={Number(selection.amount_cr) < 0 ? 'Cannot be negative' : undefined}
                       inputProps={{ min: 0 }}
                       onChange={(e) => {
                         setValidationWarning('')
                         setManualSelections((current) => current.map((item) =>
                           item.ticker === selection.ticker ? { ...item, amount_cr: e.target.value } : item))
                       }}
-                      sx={{ width: 105 }} />
-                    <ToggleButtonGroup exclusive size="small" value={selection.side}
-                      onChange={(_, side) => side && setManualSelections((current) => current.map((item) =>
-                        item.ticker === selection.ticker ? { ...item, side } : item))}>
-                      <ToggleButton value="BUY">BUY</ToggleButton>
-                      <ToggleButton value="SELL">SELL</ToggleButton>
-                    </ToggleButtonGroup>
+                      sx={{
+                        width: 96,
+                        '& .MuiInputBase-root': { height: 34 },
+                        '& .MuiInputBase-input': { py: 0.5 },
+                        '& .MuiFormHelperText-root': { mt: 0.25, lineHeight: 1 },
+                      }} />
+                    {action === 'rebalance' && (
+                      <ToggleButtonGroup exclusive size="small" value={selection.side}
+                        sx={{ '& .MuiToggleButton-root': { minHeight: 30, px: 1, py: 0.25 } }}
+                        onChange={(_, side) => side && setManualSelections((current) => current.map((item) =>
+                          item.ticker === selection.ticker ? { ...item, side } : item))}>
+                        <ToggleButton value="BUY">BUY</ToggleButton>
+                        <ToggleButton value="SELL">SELL</ToggleButton>
+                      </ToggleButtonGroup>
+                    )}
                   </Stack>
                 </Stack>
               ))}
