@@ -37,12 +37,47 @@ FEATURES = [
 ]
 
 
+def three_month_moving_average_fallbacks(df: Any) -> tuple[dict[str, float], dict[str, int]]:
+    """Estimate returns by assuming convergence to the recent open-price average.
+
+    Returns are fractions (0.05 means 5%), matching the prediction JSON
+    contract. With only two monthly observations, the available two-month
+    average is used and its actual window length is returned for disclosure.
+    """
+    import pandas as pd
+
+    prices = df[["symbol", "date", "monthly_open"]].copy()
+    prices["date"] = pd.to_datetime(prices["date"])
+    prices["monthly_open"] = pd.to_numeric(prices["monthly_open"], errors="coerce")
+    prices = prices.dropna(subset=["symbol", "date", "monthly_open"])
+    prices = prices[prices["monthly_open"] > 0]
+    prices = prices.sort_values(["symbol", "date"]).drop_duplicates(
+        ["symbol", "date"], keep="last"
+    )
+
+    predictions: dict[str, float] = {}
+    windows: dict[str, int] = {}
+    for symbol, group in prices.groupby("symbol", sort=False):
+        recent = group.tail(3)
+        if len(recent) < 2:
+            continue
+        latest_open = float(recent.iloc[-1]["monthly_open"])
+        moving_average = float(recent["monthly_open"].mean())
+        fraction = moving_average / latest_open - 1.0
+        if math.isfinite(fraction):
+            ticker = str(symbol)
+            predictions[ticker] = round(fraction, 8)
+            windows[ticker] = len(recent)
+    return predictions, windows
+
+
 def generate_predictions_for_version(
     version: str,
     data_path: str | Path = DEFAULT_DATA_PATH,
     output_path: str | Path | None = None,
     batch_size: int = 64,
     num_workers: int = 0,
+    fill_missing_with_moving_average: bool = False,
 ) -> dict[str, Any]:
     """Run one-step inference for each train-supported ticker and save fractions.
 
@@ -108,16 +143,41 @@ def generate_predictions_for_version(
         lambda s: s.pct_change() * 100
     ).fillna(0).clip(-500, 500)
 
+    fallback_price_data = df[["symbol", "date", "monthly_open"]].copy()
     columns = ["isin", "symbol", "date", *FEATURES, "target_return_1m"]
     df = df[columns].copy()
     labeled = df.dropna(subset=["stock_return_1m", "target_return_1m"]).copy()
     if labeled.empty:
         raise ValueError("No labeled rows available to reconstruct the training dataset")
 
-    train = labeled[labeled["date"] <= pd.Timestamp("2021-08-01")].copy()
+    has_training_end = "training_end" in metadata
+    training_end = pd.Timestamp(metadata.get("training_end", "2021-08-01"))
+    train = labeled[labeled["date"] <= training_end].copy()
     if train.empty:
-        raise ValueError("No training rows exist before 2021-08-01")
-    impute = {column: train[column].median() for column in FEATURES}
+        raise ValueError(f"No training rows exist through {training_end.date()}")
+    if not has_training_end:
+        train = train.groupby("isin").filter(
+            lambda group: len(group) >= encoder_length + 1
+        )
+    saved_imputation = metadata.get("imputation_medians")
+    if saved_imputation is not None:
+        if not isinstance(saved_imputation, dict):
+            raise ValueError("Model metadata imputation_medians must be an object")
+        missing_medians = sorted(set(FEATURES) - set(saved_imputation))
+        if missing_medians:
+            raise ValueError(
+                f"Model metadata is missing imputation medians: {missing_medians}"
+            )
+        impute = {}
+        for column in FEATURES:
+            value = saved_imputation[column]
+            if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                raise ValueError(
+                    f"Model metadata has an invalid imputation median for {column}"
+                )
+            impute[column] = float(value)
+    else:
+        impute = {column: train[column].median() for column in FEATURES}
 
     min_date = labeled["date"].min()
     all_isins = sorted(labeled["isin"].unique())
@@ -130,12 +190,6 @@ def generate_predictions_for_version(
     train["series_id"] = train["isin"].map(isin_to_series).astype(int)
     train.sort_values(["series_id", "time_idx"], inplace=True)
     train.reset_index(drop=True, inplace=True)
-
-    train = train.groupby("series_id").filter(lambda group: len(group) >= encoder_length + 1)
-    train = train.reset_index(drop=True)
-    supported_series = set(train["series_id"].unique())
-    if not supported_series:
-        raise ValueError("No series have enough training history for this model")
 
     train["series_id"] = train["series_id"].astype(str)
     training_dataset = TimeSeriesDataSet(
@@ -152,6 +206,11 @@ def generate_predictions_for_version(
         allow_missing_timesteps=True,
         add_relative_time_idx=True,
     )
+    supported_series = set(
+        training_dataset.decoded_index["series_id"].astype(int).unique()
+    )
+    if not supported_series:
+        raise ValueError("No series have enough training history for this model")
 
     inference = df.dropna(subset=["stock_return_1m"]).copy()
     inference[FEATURES] = inference[FEATURES].fillna(impute)
@@ -240,6 +299,17 @@ def generate_predictions_for_version(
             continue
         predictions[str(ticker)] = round(float(value) / 100.0, 8)
 
+    tft_prediction_count = len(predictions)
+    fallback_windows: dict[str, int] = {}
+    if fill_missing_with_moving_average:
+        moving_average_predictions, moving_average_windows = (
+            three_month_moving_average_fallbacks(fallback_price_data)
+        )
+        for ticker, value in moving_average_predictions.items():
+            if ticker not in predictions:
+                predictions[ticker] = value
+                fallback_windows[ticker] = moving_average_windows[ticker]
+
     destination = (
         Path(output_path)
         if output_path is not None
@@ -250,6 +320,28 @@ def generate_predictions_for_version(
     temporary_path.write_text(json.dumps(predictions, indent=2) + "\n", encoding="utf-8")
     temporary_path.replace(destination)
 
+    prediction_metadata_path = destination.with_name("prediction_metadata.json")
+    prediction_metadata = {
+        "version": version,
+        "prediction_as_of": str(aligned["date"].max().date()),
+        "prediction_count": len(predictions),
+        "tft_prediction_count": tft_prediction_count,
+        "moving_average_fallback_count": len(fallback_windows),
+        "moving_average_fallback_window_counts": {
+            str(window): sum(count == window for count in fallback_windows.values())
+            for window in sorted(set(fallback_windows.values()))
+        },
+        "fallback_method": (
+            "mean of the latest up to 3 monthly opens versus the latest open"
+            if fill_missing_with_moving_average
+            else None
+        ),
+    }
+    prediction_metadata_path.write_text(
+        json.dumps(prediction_metadata, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
     from . import forecast
 
     canonical_destination = (PREDICTIONS_DIR / version / "predictions.json").resolve()
@@ -259,8 +351,19 @@ def generate_predictions_for_version(
     return {
         "version": version,
         "predictions_count": len(predictions),
+        "tft_predictions_count": tft_prediction_count,
+        "moving_average_fallback_count": len(fallback_windows),
+        "moving_average_fallback_window_counts": {
+            str(window): sum(count == window for count in fallback_windows.values())
+            for window in sorted(set(fallback_windows.values()))
+        },
+        "moving_average_fallback_tickers": sorted(fallback_windows),
+        "fallback_tickers_with_less_than_3_months": sorted(
+            ticker for ticker, count in fallback_windows.items() if count < 3
+        ),
         "supported_training_series": len(supported_series),
         "saved_to": str(destination.resolve()),
+        "prediction_metadata_saved_to": str(prediction_metadata_path.resolve()),
         "as_of": str(aligned["date"].max().date()),
         "unsupported_tickers": unsupported_tickers,
         "missing_supported_tickers": sorted(
@@ -275,12 +378,18 @@ def main() -> None:
     parser.add_argument("--data-path", type=Path, default=DEFAULT_DATA_PATH)
     parser.add_argument("--output-path", type=Path)
     parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument(
+        "--fill-missing-with-moving-average",
+        action="store_true",
+        help="Fill missing ticker forecasts using the last three monthly opens' average",
+    )
     args = parser.parse_args()
     result = generate_predictions_for_version(
         args.version,
         data_path=args.data_path,
         output_path=args.output_path,
         batch_size=args.batch_size,
+        fill_missing_with_moving_average=args.fill_missing_with_moving_average,
     )
     print(json.dumps(result, indent=2))
 

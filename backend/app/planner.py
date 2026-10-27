@@ -224,7 +224,7 @@ def _schedule_order_trade_dates(ds, orders, returns, trade_date, settlement_date
         return ev_date if ev_date in trading_dates else None
 
     def expected_return(order):
-        return abs(returns.get(order["ticker"]) or forecast.expected_return(order["ticker"]) or 0)
+        return abs(returns.get(order["ticker"], 0.0))
 
     ordered = sorted(
         orders,
@@ -1449,7 +1449,7 @@ def iter_plan_steps(fund_id, intent):
 
     # Annotate every order with its forecast expected 1-month return.
     for o in orders:
-        o["expected_return"] = round(returns.get(o["ticker"], forecast.expected_return(o["ticker"])), 4)
+        o["expected_return"] = round(returns.get(o["ticker"], 0.0), 4)
         if settlement_date:
             o["settlement_date"] = settlement_date
 

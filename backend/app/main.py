@@ -78,9 +78,12 @@ def get_model_info():
 
 
 @app.post("/api/model/switch")
-def switch_model_version(version: str = Query(..., description="Target model version (e.g. 'v1', 'v2', 'latest')")):
-    """Switch active model version across the application in one go."""
-    new_version = forecast.set_active_model_version(version)
+def switch_model_version(version: str = Query(..., description="Only v13 (or latest) is enabled")):
+    """Select the only enabled model version."""
+    try:
+        new_version = forecast.set_active_model_version(version)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"status": "success", "switched_to": new_version, "model": forecast.get_active_model_info()}
 
 

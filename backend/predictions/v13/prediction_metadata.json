@@ -1,0 +1,12 @@
+{
+  "version": "v13",
+  "prediction_as_of": "2026-09-01",
+  "prediction_count": 437,
+  "tft_prediction_count": 399,
+  "moving_average_fallback_count": 38,
+  "moving_average_fallback_window_counts": {
+    "2": 5,
+    "3": 33
+  },
+  "fallback_method": "mean of the latest up to 3 monthly opens versus the latest open"
+}

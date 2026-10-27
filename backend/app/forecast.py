@@ -1,67 +1,49 @@
 """
-Return-forecasting layer — powered by versioned TemporalFusionTransformer (TFT) backend models.
+Return-forecasting layer — serves predictions from the pinned v13 model.
 
-Consumes versioned predictions stored under `backend/predictions/{version}/`.
-Model versions can be switched dynamically or via environment variables (`TFT_MODEL_VERSION` or `MODEL_VERSION`).
+Consumes precomputed predictions stored under `backend/predictions/v13/`.
 """
 
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
-from . import data, db
+from . import data
 
 # Root directory for backend TFT models
 MODELS_DIR = Path(__file__).resolve().parent.parent / "models" / "tft"
 PREDICTIONS_DIR = Path(__file__).resolve().parent.parent / "predictions"
+ACTIVE_MODEL_VERSION = "v13"
 
 # In-memory model cache
 _CURRENT_VERSION: str | None = None
 _MODEL_METADATA: dict[str, Any] = {}
 _PREDICTIONS: dict[str, float] = {}
-_DEFAULT_RETURN = 0.010
 
 
 def list_available_versions() -> list[str]:
-    """List model versions that have predictions under backend/predictions."""
-    versions = {
-        path.name
-        for path in PREDICTIONS_DIR.glob("v*")
-        if path.is_dir() and path.name[1:].isdigit()
-        and (path / "predictions.json").is_file()
-    }
-    if (PREDICTIONS_DIR / "predictions.json").is_file():
-        versions.add("v2")
-    return sorted(versions, key=lambda name: int(name[1:]))
+    """Return the sole model version enabled for application forecasts."""
+    prediction_file = PREDICTIONS_DIR / ACTIVE_MODEL_VERSION / "predictions.json"
+    return [ACTIVE_MODEL_VERSION] if prediction_file.is_file() else []
 
 
 def resolve_model_version(requested_version: str | None = None) -> str:
     """
-    Resolve requested version string ('latest', 'v2', etc.) to a specific version directory name.
+    Resolve the only enabled model version, rejecting attempts to select older models.
     """
-    available = list_available_versions()
-    
-    if not requested_version:
-        requested_version = os.environ.get("TFT_MODEL_VERSION") or os.environ.get("MODEL_VERSION") or "latest"
-
-    requested_version = requested_version.strip().lower()
-
-    if requested_version == "latest":
-        if available:
-            return available[-1]
-        return "v2"  # fallback default if empty
-
-    if not requested_version.startswith("v"):
-        requested_version = f"v{requested_version}"
-
-    if available and requested_version not in available:
-        # Fallback to latest or standard if requested version doesn't exist
-        return available[-1]
-
-    return requested_version
+    requested = requested_version.strip().lower() if requested_version else "latest"
+    if requested not in {"latest", ACTIVE_MODEL_VERSION, ACTIVE_MODEL_VERSION[1:]}:
+        raise ValueError(
+            f"Only {ACTIVE_MODEL_VERSION} predictions are enabled; got {requested_version!r}"
+        )
+    prediction_file = PREDICTIONS_DIR / ACTIVE_MODEL_VERSION / "predictions.json"
+    if not prediction_file.is_file():
+        raise FileNotFoundError(
+            f"Required {ACTIVE_MODEL_VERSION} predictions are missing: {prediction_file}"
+        )
+    return ACTIVE_MODEL_VERSION
 
 
 def load_model(version: str | None = None) -> str:
@@ -88,22 +70,19 @@ def load_model(version: str | None = None) -> str:
                 metadata.update(json.load(f))
         except Exception:
             pass
+    prediction_metadata_file = (
+        PREDICTIONS_DIR / target_version / "prediction_metadata.json"
+    )
+    if prediction_metadata_file.exists():
+        try:
+            with open(prediction_metadata_file, "r", encoding="utf-8") as f:
+                metadata.update(json.load(f))
+        except Exception:
+            pass
 
-    # Prefer predictions stored in the database (latest run for this version);
-    # fall back to the on-disk predictions.json when the DB is unavailable/empty.
-    db_predictions = db.get_latest_predictions(target_version)
-    if db_predictions:
-        predictions = db_predictions
-    else:
-        pred_file = PREDICTIONS_DIR / target_version / "predictions.json"
-        if target_version == "v2" and not pred_file.exists():
-            pred_file = PREDICTIONS_DIR / "predictions.json"
-        if pred_file.exists():
-            try:
-                with open(pred_file, "r", encoding="utf-8") as f:
-                    predictions = json.load(f)
-            except Exception:
-                pass
+    prediction_file = PREDICTIONS_DIR / target_version / "predictions.json"
+    with open(prediction_file, "r", encoding="utf-8") as f:
+        predictions = json.load(f)
 
     _CURRENT_VERSION = target_version
     _MODEL_METADATA = metadata
@@ -112,7 +91,7 @@ def load_model(version: str | None = None) -> str:
 
 
 def set_active_model_version(version: str) -> str:
-    """Switch the active model version across the whole application in one go."""
+    """Select the only enabled model version."""
     return load_model(version)
 
 
@@ -131,10 +110,13 @@ def get_active_model_info() -> dict[str, Any]:
 
 
 def expected_return(ticker: str) -> float:
-    """Predicted 1-month return (fraction) for one ticker from active model."""
+    """Return a model forecast, failing explicitly for unsupported tickers."""
     if _CURRENT_VERSION is None:
         load_model()
-    return _PREDICTIONS.get(ticker, _DEFAULT_RETURN)
+    try:
+        return _PREDICTIONS[ticker]
+    except KeyError as exc:
+        raise KeyError(f"No {ACTIVE_MODEL_VERSION} forecast is available for {ticker}") from exc
 
 
 def predict_returns(tickers) -> dict[str, float]:
@@ -145,7 +127,7 @@ def predict_returns(tickers) -> dict[str, float]:
     an already-running server without requiring a restart.
     """
     load_model(_CURRENT_VERSION)
-    return {t: expected_return(t) for t in tickers}
+    return {ticker: _PREDICTIONS[ticker] for ticker in tickers if ticker in _PREDICTIONS}
 
 
 def _name_sector(ds, ticker):
@@ -169,7 +151,7 @@ def forecast_rows(ds, tickers=None) -> list[dict]:
         relevant = set(tickers)
 
     rows = []
-    for tk in relevant:
+    for tk in relevant.intersection(_PREDICTIONS):
         name, sector = _name_sector(ds, tk)
         rows.append({
             "ticker": tk,
@@ -187,20 +169,39 @@ def summary(ds, tickers=None) -> dict:
     version = info["version"]
     model_name = info["model_name"]
     is_placeholder = info["is_placeholder"]
+    requested_tickers = (
+        {h["ticker"] for h in ds["holdings"]}
+        | {u["ticker"] for u in data.UNIVERSE}
+        if tickers is None
+        else set(tickers)
+    )
+    uncovered_count = len(requested_tickers - _PREDICTIONS.keys())
+    note = (
+        f"Predicted 1-month returns generated by {model_name}."
+        if not is_placeholder
+        else "Dummy returns — placeholder until TFT predictions are loaded."
+    )
+    if not is_placeholder and info["metadata"].get("moving_average_fallback_count"):
+        note += (
+            f" {info['metadata']['moving_average_fallback_count']} covered tickers use "
+            "three-month moving-average fallbacks."
+        )
+    if uncovered_count:
+        note += f" No v13 forecast is available for {uncovered_count} requested tickers; they are omitted."
 
     return {
         "model": model_name,
         "version": version,
         "horizon": "1 month",
-        "as_of": info["metadata"].get("saved_at_utc", data.TODAY.isoformat()),
+        "as_of": info["metadata"].get(
+            "prediction_as_of",
+            info["metadata"].get("saved_at_utc", data.TODAY.isoformat()),
+        ),
         "is_placeholder": is_placeholder,
-        "note": f"Predicted 1-month returns generated by {model_name}."
-                if not is_placeholder
-                else "Dummy returns — placeholder until TFT predictions are loaded.",
+        "note": note,
         "rows": forecast_rows(ds, tickers),
     }
 
 
 # Initial load at import time
 load_model()
-

@@ -29,12 +29,24 @@ uvicorn app.main:app --reload --port 8000
 | File | Responsibility |
 |------|----------------|
 | `app/data.py` | Synthetic dataset (fund, holdings, cash, pending trades, lock-ins, compliance limits, corporate actions, expense, universe, events). Replace with live feeds later. |
-| `app/forecast.py` | **Return-forecasting placeholder** — dummy expected 1-month returns per stock, in the shape the production TFT model will produce. Swap the body of `predict_returns` for real inference later. |
+| `app/forecast.py` | Loads the pinned v13 expected 1-month returns from `predictions/v13/predictions.json`. |
 | `app/optimizer.py` | **Convex-optimization engine (CVXPY)**, adapted from the `mozart` prototype: `optimize_buy` / `optimize_sell` / `optimize_rebalance`. Optional dependency — if `cvxpy` is missing the planner falls back to rules. |
 | `app/policy.py` | Proposed pre-trade policy evaluator for mandate, liquidity, concentration, corporate-action, restriction, ESG, country, cash-flow, and plan-creation rules. Dummy thresholds are versioned in the generated plan. |
 | `app/planner.py` | Cash-flow planning, funding, order generation (rule-based **or** forecast-driven convex optimization), compliance checks, risk flags, recommendation. |
 | `app/schemas.py` | Pydantic request/response models. |
 | `app/main.py` | FastAPI app & routes. |
+
+## Active forecasts
+
+The backend serves v13 predictions only; older model versions cannot be selected
+through environment variables or the model-switch endpoint. The committed
+`predictions/v13/predictions.json` contains TFT percentage-return forecasts and
+three-month moving-average fallbacks for tickers without TFT forecasts.
+`prediction_metadata.json` records the coverage and fallback method. The
+September-refreshed modeling dataset is
+`../data/processed/final/stock_macro_monthly_target_yfinance_2026-09.csv`.
+Tickers outside the prediction file are omitted from forecast rows rather than
+being assigned a placeholder return.
 
 ## Allocation methods
 
